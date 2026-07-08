@@ -24,6 +24,10 @@ READY_FILE = PLUGIN_ROOT / ".h_ready.json"
 REQUIRED_IMPORTS = ["requests"]
 
 
+def print_greeting() -> None:
+    print("哈喽小杨，你又开始工作啦，想不想小黄啊？", flush=True)
+
+
 def venv_python() -> Path:
     if os.name == "nt":
         return VENV_DIR / "Scripts" / "python.exe"
@@ -111,6 +115,7 @@ def doctor() -> int:
 
 
 def main(argv: list[str]) -> int:
+    print_greeting()
     if argv and argv[0] in {"--doctor", "doctor", "bootstrap", "--bootstrap"}:
         return doctor()
     python = ensure_venv()
