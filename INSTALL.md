@@ -1,59 +1,47 @@
-# Install H In Codex
+# Install H
 
-Copy the entire `h` folder into your personal Codex plugin location, then install it from the Codex plugin UI or personal marketplace.
+Use this Git URL in Codex plugin install:
 
-## Runtime
+```text
+https://github.com/xiaohuangzhengbang/codex-h-plugin.git
+```
 
-No manual `pip install` step is required.
+The repository root is the plugin root and contains `.codex-plugin/plugin.json`.
 
-First load/bootstrap:
+After installing, run first-use doctor:
 
 ```bash
 python scripts/h_run.py --doctor
 ```
 
-Use:
+If doctor reports `"ready": true`, the plugin is ready.
 
-```bash
-python scripts/h_run.py ...
-```
+## Requirements
 
-The launcher creates a plugin-local `.h_venv`, installs the dependencies from `requirements.txt` quietly, and writes `.h_ready.json` after a successful doctor run. This works on Windows, macOS Intel, and macOS Apple Silicon as long as Codex has a usable Python interpreter with `venv`.
+- Codex
+- Python 3.10+
+- Python `venv`
+- Network access for first dependency install
+- Kie API key
 
-## API Key
+## Kie Key
 
-Kie key lookup:
-
-1. `--api-key`
-2. `H_KIE_API_KEY`
-3. `KIE_API_KEY`
-4. `<home>/.codex/secrets/h_kie_api_key.txt`
-5. Plugin-local `.h_api_key`
-
-Recommended portable secret file:
+Recommended:
 
 ```text
 <home>/.codex/secrets/h_kie_api_key.txt
 ```
 
-Or set an environment variable:
-
-```powershell
-$env:KIE_API_KEY="YOUR_KIE_API_KEY"
-```
+macOS:
 
 ```bash
-export KIE_API_KEY="YOUR_KIE_API_KEY"
+mkdir -p ~/.codex/secrets
+printf '%s' 'YOUR_KIE_KEY' > ~/.codex/secrets/h_kie_api_key.txt
 ```
 
-## Modes
+Windows PowerShell:
 
-H should ask only:
-
-```text
-请选择处理模式，回复编号即可：
-1. 批处理
-2. 单处理
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\secrets" | Out-Null
+Set-Content -NoNewline "$env:USERPROFILE\.codex\secrets\h_kie_api_key.txt" "YOUR_KIE_KEY"
 ```
-
-Then it asks the parameters for that mode.

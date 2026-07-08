@@ -1,87 +1,115 @@
-# H
+# H Codex Plugin
 
-H is a portable pure-Kie Codex plugin for product image and video workflows.
+Portable pure-Kie Codex plugin for batch and single image/video workflows.
 
-It has two user-facing modes:
+This repository is a Codex plugin root. It contains:
 
 ```text
-1. 批处理
-2. 单处理
+.codex-plugin/plugin.json
+skills/
+scripts/
+assets/
+requirements.txt
 ```
 
-- `批处理`: process every eligible item under one folder/root concurrently.
-- `单处理`: call one selected Kie model once with one prompt and supplied media.
+## Install From Git URL
 
-## Portable Runtime
+In Codex, install a plugin from this Git URL:
 
-Always run commands through:
-
-```bash
-python scripts/h_run.py ...
+```text
+https://github.com/xiaohuangzhengbang/codex-h-plugin.git
 ```
 
-The launcher uses only the Python standard library, creates a plugin-local `.h_venv`, installs `requirements.txt` quietly, and then runs the real workflow script. This avoids repeated failures on new Windows/macOS machines where `requests` is not installed.
+After install, enable plugin `H`.
 
-First load on a new computer should run:
+## First Use
+
+On first use, H should run its bootstrap check:
 
 ```bash
 python scripts/h_run.py --doctor
 ```
 
-Doctor checks and prepares:
+The doctor command prepares:
 
-- Python + `venv`
 - plugin-local `.h_venv`
 - `requests>=2.32,<3`
-- main script presence
 - Desktop output availability
-- Kie API key source
+- Kie key source detection
 
-Successful doctor writes `.h_ready.json`; future runs skip the visible bootstrap unless the environment is missing.
+Successful doctor output contains:
+
+```json
+{
+  "ready": true
+}
+```
+
+## Kie Key
+
+Do not commit API keys.
+
+Recommended key file:
+
+```text
+<home>/.codex/secrets/h_kie_api_key.txt
+```
+
+macOS example:
+
+```bash
+mkdir -p ~/.codex/secrets
+printf '%s' 'YOUR_KIE_KEY' > ~/.codex/secrets/h_kie_api_key.txt
+```
+
+Windows PowerShell example:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\secrets" | Out-Null
+Set-Content -NoNewline "$env:USERPROFILE\.codex\secrets\h_kie_api_key.txt" "YOUR_KIE_KEY"
+```
+
+## Modes
+
+H has two modes:
+
+```text
+1. Batch processing
+2. Single processing
+```
+
+Batch mode processes all eligible files under a folder concurrently.
+
+Single mode calls one selected Kie model once with one prompt and supplied media.
 
 ## Output
 
-By default, H writes to the user's Desktop:
+By default, H writes to:
 
 ```text
-Desktop/H返回结果_<input-folder-name>/
-  文本/
-  图像/
-  视频/
+<home>/Desktop/H_results_<input-folder-name>/
 ```
 
-## Batch Image Stage
+The runtime script may create localized subfolders for text, images, and videos.
+
+## Run Commands
+
+Use the portable launcher:
 
 ```bash
-python scripts/h_run.py process-images "/path/to/root" \
-  --image-model 1 \
-  --image-resolution 1 \
-  --aspect-ratio 2 \
-  --reverse-model 1 \
-  --image-reverse-meta-prompt "将每张产品图片反推为详细的 Kie 图片生成提示词。PID：{pid}"
+python scripts/h_run.py ...
 ```
 
-`--resolution` is kept as a compatibility alias for `--image-resolution`.
+Do not run `scripts/kie_video_batch.py` directly unless debugging.
 
-## Batch Video Stage
+## Safety
 
-```bash
-python scripts/h_run.py generate-videos "/path/to/root" \
-  --video-model 5 \
-  --duration 8 \
-  --aspect-ratio 2 \
-  --reverse-model 1 \
-  --video-reverse-meta-prompt "将这张处理后的产品图片反推为 Kie 视频生成提示词。PID：{pid}"
+Ignored by git:
+
+```text
+.h_api_key
+.h_ready.json
+.h_venv/
+__pycache__/
+*.pyc
 ```
-
-## Secrets
-
-Kie API key lookup order:
-
-1. `--api-key`
-2. `H_KIE_API_KEY`
-3. `KIE_API_KEY`
-4. `<home>/.codex/secrets/h_kie_api_key.txt`
-5. Plugin-local `.h_api_key`
-
-Do not publish plugin-local key files publicly.
