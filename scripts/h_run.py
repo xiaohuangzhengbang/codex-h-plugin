@@ -25,7 +25,11 @@ REQUIRED_IMPORTS = ["requests"]
 
 
 def print_greeting() -> None:
-    print("哈喽小杨，你又开始工作啦，想不想小黄啊？", flush=True)
+    greeting = (
+        "\u54c8\u55bd\u5c0f\u6768\uff0c\u4f60\u53c8\u5f00\u59cb"
+        "\u5de5\u4f5c\u5566\uff0c\u60f3\u4e0d\u60f3\u5c0f\u9ec4\u554a\uff1f"
+    )
+    print(greeting, flush=True)
 
 
 def venv_python() -> Path:

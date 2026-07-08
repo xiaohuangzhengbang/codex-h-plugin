@@ -7,13 +7,19 @@ description: Pure Kie batch workflow for PID-named product folders. Use when the
 
 H is a pure Kie batch workflow. It submits all eligible PID items under the whole input root concurrently. Subfolders are only used to preserve output organization; they must not serialize generation.
 
-When H is invoked, the first user-visible chat message must begin with:
+When H is invoked, the first user-visible chat message must begin with the Chinese greeting represented by these Unicode code points:
 
 ```text
-哈喽小杨，你又开始工作啦，想不想小黄啊？
+U+54C8 U+55BD U+5C0F U+6768 U+FF0C U+4F60 U+53C8 U+5F00 U+59CB U+5DE5 U+4F5C U+5566 U+FF0C U+60F3 U+4E0D U+60F3 U+5C0F U+9EC4 U+554A U+FF1F
 ```
 
-This greeting must be sent in the chat itself, not only printed by the Python launcher, because Codex may summarize or hide tool stdout.
+Rendered greeting:
+
+```text
+Ha-lou Xiao Yang, ni you kai shi gong zuo la, xiang bu xiang Xiao Huang a?
+```
+
+The rendered chat output must be the actual Chinese text from the code points, not pinyin and not mojibake. This greeting must be sent in the chat itself, not only printed by the Python launcher, because Codex may summarize or hide tool stdout.
 
 Default workflow:
 
@@ -124,33 +130,35 @@ If `--output-dir` is provided, H must still create the same three subfolders ins
 
 ## Required Interaction
 
-H has exactly two user-facing entry modes and the first prompt must show only these two choices:
+H has exactly two user-facing entry modes and the first prompt must show only these two choices.
+
+The mode prompt must be rendered from these Unicode code points, not copied from any non-ASCII template:
 
 ```text
-请选择处理模式，回复编号即可：
-1. 批处理
-2. 单处理
+U+8BF7 U+9009 U+62E9 U+5904 U+7406 U+6A21 U+5F0F U+FF0C U+56DE U+590D U+7F16 U+53F7 U+5373 U+53EF U+FF1A
+1. U+6279 U+5904 U+7406
+2. U+5355 U+5904 U+7406
 ```
 
-Do not explain the mode choice as "give me a folder path or give me model + prompt". Do not ask for model parameters before the user has chosen `批处理` or `单处理`.
+The rendered chat output must be actual Chinese text from the code points, not pinyin and not mojibake. Do not explain the mode choice as "give me a folder path or give me model + prompt". Do not ask for model parameters before the user has chosen mode `1` or mode `2`.
 
 Internal routing:
 
-- `批处理`: process a folder/root path and all eligible files under it.
-- `单处理`: call one selected Kie model once with one prompt and the supplied media.
+- Mode `1`: batch processing. Process a folder/root path and all eligible files under it.
+- Mode `2`: single processing. Call one selected Kie model once with one prompt and the supplied media.
 
-Do not mix the two modes. If the user explicitly says batch/all/folder/root, use `批处理`. If the user explicitly says single/one model/try one model, use `单处理`. If unclear, ask only the two-mode prompt above.
+Do not mix the two modes. If the user explicitly says batch/all/folder/root, use mode `1`. If the user explicitly says single/one model/try one model, use mode `2`. If unclear, ask only the two-mode prompt above.
 
-In `单处理`:
+In mode `2`:
 
 1. Do not scan the whole folder as product batches.
 2. Do not ask for batch workers, PID folder layout, mannequin/product batch prompts, or folder-wide reverse prompts unless the user explicitly asks for them.
 3. Ask only for the selected model, task type if needed, prompt, media files/URLs, aspect ratio/resolution/duration fields supported by that model, and output folder.
 4. Apply the same model-specific payload and media-count rules as folder batch mode.
-5. Save the returned result under the Desktop output root in the matching `文本`, `图像`, or `视频` folder.
+5. Save the returned result under the Desktop output root in the matching text/image/video Chinese output folders.
 6. If the user provides one local folder only as a convenient media container for the single call, treat its files as that single model call's media inputs, not as PID batch items.
 
-In `批处理`:
+In mode `1`:
 
 1. Confirm H will process all PID images under the whole input root concurrently.
 2. Ask for image model, image resolution, and image aspect ratio in one combined prompt. The user must be able to answer all three together, for example `1 1 2` = model 1, resolution 1K, ratio 16:9. Do not split these into separate turns unless the user explicitly asks.
