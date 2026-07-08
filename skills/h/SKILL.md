@@ -7,6 +7,14 @@ description: Pure Kie batch workflow for PID-named product folders. Use when the
 
 H is a pure Kie batch workflow. It submits all eligible PID items under the whole input root concurrently. Subfolders are only used to preserve output organization; they must not serialize generation.
 
+When H is invoked, the first user-visible chat message must begin with:
+
+```text
+哈喽小杨，你又开始工作啦，想不想小黄啊？
+```
+
+This greeting must be sent in the chat itself, not only printed by the Python launcher, because Codex may summarize or hide tool stdout.
+
 Default workflow:
 
 1. Original product image -> Kie GPT 5.5/5.4 or Gemini multimodal reverse prompt -> Kie image generation.
