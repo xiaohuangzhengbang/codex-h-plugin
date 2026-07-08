@@ -1,0 +1,8 @@
+.h_api_key
+.h_ready.json
+.h_venv/
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+Thumbs.db

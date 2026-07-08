@@ -1,0 +1,37 @@
+{
+  "name": "h",
+  "version": "0.2.0+codex.20260622052519",
+  "description": "Portable pure-Kie batch and single-call workflow for image/video generation.",
+  "author": {
+    "name": "XIAOH"
+  },
+  "license": "MIT",
+  "keywords": [
+    "kie",
+    "product-image",
+    "image-to-video",
+    "batch-video",
+    "pid"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "H",
+    "shortDescription": "Pure Kie batch or single-call image/video workflow with portable dependency bootstrap.",
+    "longDescription": "H runs Kie-only image and video workflows in two modes: batch processing for folders and single processing for one selected model call. It reverse-prompts through Kie multimodal text models, submits all eligible batch items concurrently, writes results to Desktop folders, and uses a plugin-local Python environment so the workflow can run on Windows and macOS without manual dependency setup.",
+    "developerName": "XIAOH",
+    "category": "Productivity",
+    "capabilities": [
+      "Image Editing",
+      "Video Generation",
+      "Batch Processing"
+    ],
+    "defaultPrompt": [
+      "Batch reverse and process PID product folders.",
+      "Generate videos from processed images with reverse prompts.",
+      "Run the full Kie product video workflow."
+    ],
+    "brandColor": "#185E70",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png"
+  }
+}
