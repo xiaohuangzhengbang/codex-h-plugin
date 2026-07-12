@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-15-intel
+          - macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Exercise first-use bootstrap
+        run: python scripts/h_run.py bootstrap
+      - name: Exercise Windows launcher
+        if: runner.os == 'Windows'
+        run: scripts\h_run.cmd catalog
+      - name: Exercise macOS launcher
+        if: runner.os == 'macOS'
+        run: ./scripts/h_run.sh catalog
+      - name: Run regression tests
+        run: python scripts/test_kie_result_url.py
+      - name: Validate Python syntax
+        run: python -m compileall -q scripts
+      - name: Validate catalog without a Kie key
+        run: python scripts/kie_video_batch.py catalog
+      - name: Reject committed secrets
+        shell: bash
+        run: |
+          if git grep -n -I -E '(sk-[A-Za-z0-9]{16,}|[a-f0-9]{32})' -- . ':!assets/*'; then
+            echo "Potential API key committed"
+            exit 1
+          fi

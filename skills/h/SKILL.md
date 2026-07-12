@@ -1,218 +1,66 @@
 ---
 name: h
-description: Pure Kie batch workflow for PID-named product folders. Use when the user gives product-image folders and wants every original product image reverse-prompted by Kie multimodal text models, then generated as images/videos through Kie with whole-root concurrency.
+description: "Kie-only text, image, and video workflow with two user-facing modes: whole-folder concurrent batch processing and one-model single processing. Use for PID product folders, Kie reverse prompting, image generation, video generation, Grok post-processing, or resuming saved Kie tasks."
 ---
 
 # H
 
-H is a pure Kie batch workflow. It submits all eligible PID items under the whole input root concurrently. Subfolders are only used to preserve output organization; they must not serialize generation.
-
-When H is invoked, the first user-visible chat message must begin with the Chinese greeting represented by these Unicode code points:
+H 只调用 Kie。首次回复必须先说：
 
 ```text
-U+54C8 U+55BD U+5C0F U+6768 U+FF0C U+4F60 U+53C8 U+5F00 U+59CB U+5DE5 U+4F5C U+5566 U+FF0C U+60F3 U+4E0D U+60F3 U+5C0F U+9EC4 U+554A U+FF1F
+哈喽小杨，你又开始工作啦，想不想小黄啊？
 ```
 
-Rendered greeting:
+## 固定入口
+
+用户尚未说明模式时，只问：
 
 ```text
-Ha-lou Xiao Yang, ni you kai shi gong zuo la, xiang bu xiang Xiao Huang a?
+请选择处理模式，回复编号即可：
+1. 批处理
+2. 单处理
 ```
 
-The rendered chat output must be the actual Chinese text from the code points, not pinyin and not mojibake. This greeting must be sent in the chat itself, not only printed by the Python launcher, because Codex may summarize or hide tool stdout.
+- 批处理：递归扫描整个根目录，所有 PID 图片进入同一个并发池；文件夹只负责保持输出层级，不能逐文件夹串行等待。
+- 单处理：只调用一次用户选择的模型，不把媒体目录拆成 PID 批次。
+- 用户已明确说“全部、整个文件夹、批量”或“单次、一个模型”时直接进入对应模式，不重复问。
 
-Default workflow:
+## 启动与密钥
 
-1. Original product image -> Kie GPT 5.5/5.4 or Gemini multimodal reverse prompt -> Kie image generation.
-2. Generated product image -> Kie GPT 5.5/5.4 or Gemini multimodal reverse video prompt -> Kie video generation.
+始终通过便携启动器运行，不能直接运行 `kie_video_batch.py`：
 
-Each PID is independent. Never reuse one reversed prompt across different products.
+- Windows：`scripts\h_run.cmd`
+- macOS Intel / Apple Silicon：`./scripts/h_run.sh`
 
-## Hard Rules
+首次使用先运行 `doctor`。启动器在 `<home>/.codex/cache/h` 一次性创建并复用 Python 虚拟环境；不要手工安装 `requests`，也不要在插件目录创建新环境。
 
-1. Do not call any non-Kie provider. All reverse prompting, image generation, and video generation must stay inside Kie.
-2. Default reverse model is `gpt-5-5`; fallback is `gpt-5-4`.
-3. Gemini reverse models are allowed only through Kie OpenAI-compatible chat endpoints.
-4. Submit every eligible PID under the whole input root concurrently. If one image takes about 3 minutes, ten images should be submitted together and finish in roughly the same generation window, subject to provider limits.
-5. Save each reverse prompt immediately after reverse succeeds and before generation submission. Reruns must reuse saved `.reverse.txt` / `.video_reverse.txt`.
-6. Result parsing must prefer `resultJson` / `resultUrls`. Never save `param`, `input`, `input_urls`, uploaded source URLs, or original CDN URLs as generated outputs.
-7. If a resolved image result URL equals the uploaded source URL, fail that PID instead of saving a false success.
-8. A forced rerun must remove stale PID output files, reverse prompt text, and JSON record before regeneration.
-9. Model request payloads are model-specific. Do not reuse one image/video payload shape across all models.
-10. User-facing model selection must list all available choices by number. Do not say only "recommended 1" or hide the rest of the model list.
-11. Always run the workflow through `python scripts/h_run.py`, not directly through `python scripts/kie_video_batch.py`. The launcher creates a plugin-local Python environment and installs `requirements.txt` quietly.
-12. If a historical command uses `--resolution`, keep it working by treating it as `--image-resolution`; do not stop the workflow to explain the rename.
-13. Do not print long dependency-install logs unless dependency setup fails. On success, continue directly to the requested batch/single processing.
-14. On the first H use in a plugin directory or on a new computer, run `python scripts/h_run.py --doctor` before asking for processing parameters. If `.h_ready.json` exists and is current for this plugin directory, skip the doctor step.
-
-## Runtime Requirements
-
-H must verify these requirements once during first load/bootstrap:
-
-- Python 3.10+ available to Codex.
-- Python `venv` module available.
-- Network access for installing `requirements.txt` if the plugin-local `.h_venv` does not already exist.
-- Runtime dependency: `requests>=2.32,<3`.
-- Kie API key from `--api-key`, `H_KIE_API_KEY`, `KIE_API_KEY`, `<home>/.codex/secrets/h_kie_api_key.txt`, or plugin-local `.h_api_key`.
-- Writable plugin directory for `.h_venv` and `.h_ready.json`.
-- Writable Desktop output directory.
-
-First-load bootstrap command:
-
-```bash
-python scripts/h_run.py --doctor
-```
-
-If doctor succeeds, do not show dependency setup details to the user again. If doctor fails, report only the failed requirement and the short fix.
-
-## Folder Model
-
-Input can be:
+密钥顺序：`--api-key`、`H_KIE_API_KEY`、`KIE_API_KEY`、`<home>/.codex/secrets/h_kie_api_key.txt`、插件本地 `.h_api_key`。缺少密钥时只说明需要进行一次密钥设置；不得把密钥写进仓库、回复或日志。
 
 ```text
-root/
-  project-A/
-    PID001.png
-    PID002.png
-  project-B/
-    PID003.png
-    PID004.png
+scripts/h_run.sh doctor
+scripts\h_run.cmd doctor
 ```
 
-Stage 1 writes:
+若 `doctor` 失败，按返回类别直接归因：`authentication` 密钥、`quota` 额度、`validation` 参数、`rate_limit` 限流、`maintenance/provider` 服务端、`network` 网络/TLS。不要盲目重复提交生成任务。
+
+## 模型目录
+
+每次选择前运行 `catalog`，把对应类别的全部编号列给用户。不能只给推荐项，也不能把同一模型的文生/图生端点拆成两个用户选项。
 
 ```text
-Desktop/
-  H返回结果_root/
-    文本/
-      project-A/
-        PID001.reverse.txt
-        PID001.image.json
-        processed_manifest.json
-      h_processed_batch_manifest.json
-    图像/
-      project-A/
-        PID001.png
-    视频/
+scripts/h_run.sh catalog
+scripts\h_run.cmd catalog
 ```
 
-Stage 2 writes:
+- 文本：GPT 5.5 Response、GPT 5.4 Response、Gemini 3.1 Pro、Gemini 3 Pro、Gemini 3.5 Flash、Gemini 3 Flash。
+- 图像：GPT Image-2、Nano Banana、Nano Banana Pro、Nano Banana 2、Nano Banana 2 Lite、Seedream 5.0 Lite。
+- 视频：Grok Imagine、Grok Imagine Video 1.5 Preview、Veo3.1 Lite/Fast/Quality、Gemini Omni Video、Seedance 2.0/Fast/Mini；单处理另可选 Grok Upscale/Extend。
 
-```text
-Desktop/
-  H返回结果_root/
-    文本/
-      project-A/
-        PID001.video_reverse.txt
-        PID001.video.json
-        video_manifest.json
-      h_video_batch_manifest.json
-    图像/
-      project-A/
-        PID001.png
-    视频/
-      project-A/
-        PID001.mp4
-```
+GPT 5.5 暂时不可用时脚本自动回退 GPT 5.4；鉴权、额度或参数错误不得回退。JSON 记录必须显示请求模型、实际模型和是否回退。
 
-If the input folder directly contains PID images, treat that folder as one project.
+## 批处理
 
-If `--output-dir` is not provided, H must automatically create the result folder on the user's Desktop. This must work on Windows, macOS Intel, and macOS Apple Silicon:
-
-```text
-<home>/Desktop/H返回结果_<input-folder-name>/
-  文本/
-  图像/
-  视频/
-```
-
-If `--output-dir` is provided, H must still create the same three subfolders inside that output directory.
-
-## Required Interaction
-
-H has exactly two user-facing entry modes and the first prompt must show only these two choices.
-
-The mode prompt must be rendered from these Unicode code points, not copied from any non-ASCII template:
-
-```text
-U+8BF7 U+9009 U+62E9 U+5904 U+7406 U+6A21 U+5F0F U+FF0C U+56DE U+590D U+7F16 U+53F7 U+5373 U+53EF U+FF1A
-1. U+6279 U+5904 U+7406
-2. U+5355 U+5904 U+7406
-```
-
-The rendered chat output must be actual Chinese text from the code points, not pinyin and not mojibake. Do not explain the mode choice as "give me a folder path or give me model + prompt". Do not ask for model parameters before the user has chosen mode `1` or mode `2`.
-
-Internal routing:
-
-- Mode `1`: batch processing. Process a folder/root path and all eligible files under it.
-- Mode `2`: single processing. Call one selected Kie model once with one prompt and the supplied media.
-
-Do not mix the two modes. If the user explicitly says batch/all/folder/root, use mode `1`. If the user explicitly says single/one model/try one model, use mode `2`. If unclear, ask only the two-mode prompt above.
-
-In mode `2`:
-
-1. Do not scan the whole folder as product batches.
-2. Do not ask for batch workers, PID folder layout, mannequin/product batch prompts, or folder-wide reverse prompts unless the user explicitly asks for them.
-3. Ask only for the selected model, task type if needed, prompt, media files/URLs, aspect ratio/resolution/duration fields supported by that model, and output folder.
-4. Apply the same model-specific payload and media-count rules as folder batch mode.
-5. Save the returned result under the Desktop output root in the matching text/image/video Chinese output folders.
-6. If the user provides one local folder only as a convenient media container for the single call, treat its files as that single model call's media inputs, not as PID batch items.
-
-In mode `1`:
-
-1. Confirm H will process all PID images under the whole input root concurrently.
-2. Ask for image model, image resolution, and image aspect ratio in one combined prompt. The user must be able to answer all three together, for example `1 1 2` = model 1, resolution 1K, ratio 16:9. Do not split these into separate turns unless the user explicitly asks.
-3. Validate that image model, resolution, and aspect ratio are all selected before asking any reverse model or prompt. If one value is missing, ask only for the missing value.
-4. The default may be shown only as "直接回车：使用默认 1 1 2".
-5. Ask for image reverse text model by listing every available reverse model choice with its number. Do not silently use the default unless the user presses Enter.
-6. Ask for image reverse meta prompt. The default prompt must be Chinese and may be shown only as "直接回车：使用默认：将每张产品图片反推为详细的 Kie 图片生成提示词。PID：{pid}".
-7. Run `process-images` on the root folder using the selected image reverse model via `--reverse-model`.
-8. After all processed images complete, ask whether to generate videos.
-9. If yes, ask for video model by listing every available video model choice with its number. Include maximum supported duration only when the maximum is confirmed, otherwise say the duration follows Kie's current model support. Do not present one model as the recommendation.
-10. Ask for video duration. Filter choices only when the selected model has a confirmed maximum duration; do not treat documentation examples as maximums.
-11. Ask for video aspect ratio by listing every available ratio choice with its number.
-12. Ask for video reverse text model by listing every available reverse model choice with its number. Do not silently reuse the image reverse model unless the user presses Enter.
-13. Ask for video reverse meta prompt. The default prompt must be Chinese and may be shown only as "直接回车：使用默认：将这张处理后的产品图片反推为 Kie 视频生成提示词。PID：{pid}".
-14. Run `generate-videos` on the same root folder or processed root using the selected video reverse model via `--reverse-model`. When the same original root is passed, H should automatically find `Desktop/H返回结果_<input-folder-name>/图像`.
-15. Return the Desktop/output root plus the `文本`, `图像`, and `视频` folders and generated file paths.
-
-Model/radio prompt format must be explicit and enumerable. For image generation, always use the combined image parameter prompt. Do not ask image model alone.
-
-Reverse text model prompt format must be shown before image reverse meta prompt and before video reverse meta prompt:
-
-```text
-请选择反推文本模型，回复编号即可：
-1. GPT 5.5 response
-2. GPT 5.4 response
-3. Gemini 3.1 Pro
-4. Gemini 3 Pro
-5. Gemini 3.5 Flash
-6. Gemini 3 Flash
-直接回车：使用默认 1
-```
-
-```text
-请选择图片模型，回复编号即可：
-1. GPT Image-2
-2. Nano Banana
-3. Nano Banana Pro
-4. Nano Banana 2
-5. Nano Banana 2 Lite
-6. Seedream 5.0 Lite
-直接回车：使用默认 1
-```
-
-Image resolution prompt format:
-
-```text
-请选择图片分辨率，回复编号即可：
-1. 1K
-2. 2K
-3. 4K
-直接回车：使用默认 1K
-```
-
-Current correct image resolution and aspect prompts. These two prompts are mandatory after image model selection:
+先取得根目录，再一次询问图片生成所需参数：
 
 ```text
 请选择图片参数，按顺序回复：图片模型 分辨率 比例
@@ -233,217 +81,99 @@ Current correct image resolution and aspect prompts. These two prompts are manda
 比例：
 1. 9:16
 2. 16:9
-
-示例：1 1 2
-直接回车：使用默认 1 1 2
 ```
 
-Bad interaction pattern:
+随后列出全部反推文本模型并收集反推元提示词。默认元提示词仅在用户直接回车时使用：
 
 ```text
-图片模型：推荐 1 = GPT Image-2 image-to-image
-1. GPT Image-2 image-to-image
-2. GPT Image-2 text-to-image
+将每张产品图片反推为详细、可直接用于 Kie 的图片生成提示词，严格保留服装版型、颜色、面料和细节。PID：{pid}
 ```
 
-Video model prompt format must also list model families, not raw text/image endpoints. Do not write example durations as maximums unless the docs explicitly confirm the max:
-
-Current correct video model list:
+运行：
 
 ```text
-请选择视频模型，回复编号即可：
-1. Grok Imagine（最长 30s；0 图文生，1 图图生）
-2. Grok Imagine Video 1.5 Preview（最长 15s；仅支持 0-1 图）
-3. Veo3.1 Lite（固定约 8s；支持 0 图、1-2 图、3 图）
-4. Veo3.1 Fast（固定约 8s；支持 0 图、1-2 图、3 图）
-5. Veo3.1 Quality（固定约 8s；支持 0 图、1-2 图；参考图能力按 Kie 当前支持）
-6. Gemini Omni Video（时长按 Kie 当前模型支持）
-7. Seedance 2.0（最长 15s；支持 0/1/2/3-9 图或视频/音频参考）
-8. Seedance 2.0 Fast（最长 15s；同 Seedance 路由）
-9. Seedance 2.0 Mini（最长 15s；同 Seedance 路由）
-直接回车：使用默认 4
+scripts/h_run.sh process-images <根目录> --image-model <编号> --image-resolution <编号> --aspect-ratio <编号> --reverse-model <编号> --image-reverse-meta-prompt <提示词>
 ```
+
+`--workers 0` 表示整棵目录按项目数并发，最多 64；不要改成逐项等待。每个 PID 使用自己的原图进行 Kie 多模态反推，再用同一原图生成，不能跨 PID 复用提示词。
+
+图片完成后，必须显示输出根目录、成功数、失败数和失败 PID/类别，然后显示：
 
 ```text
-请选择视频模型，回复编号即可：
-1. Grok Imagine（最高 6s）
-2. Grok Imagine Video 1.5 Preview（最高 8s）
-3. Veo3.1 Lite（最高 8s）
-4. Veo3.1 Fast（最高 8s）
-5. Veo3.1 Quality（最高 8s）
-6. Gemini Omni Video（最高 4s）
-7. Seedance 2.0（最高 15s）
-8. Seedance 2.0 Fast（最高 15s）
-9. Seedance 2.0 Mini（最高 15s）
-直接回车：使用默认 4
+请选择下一步：
+1. 继续生成视频
+2. 只重试失败项
+3. 处理新的文件夹
+4. 结束
 ```
 
-Ignore any older duration examples above that conflict with the current correct model list.
+选择 2 时原命令重跑即可：脚本校验成功缓存，只重做失败项，并继续已保存的 `task_id`，不能重复提交仍在运行的任务。
 
-After the video model is selected, ask duration using the selected model's supported list:
+选择 1 后，一次收集视频模型、时长、分辨率、比例、反推文本模型和视频反推元提示词。必须显示模型最长时长：Grok 30 秒，Grok 1.5 Preview 15 秒，Veo 固定约 8 秒，Seedance 15 秒；Gemini Omni 显示“按 Kie 当前支持”，不得猜测上限。
 
 ```text
-Grok Imagine：4s / 6s / 8s / 10s / 15s / 20s / 25s / 30s
-Grok Imagine Video 1.5 Preview：4s / 6s / 8s / 10s / 15s
-Veo3.1 Lite/Fast/Quality：固定约 8s
-Gemini Omni Video：除非新增确认上限，否则展示 Kie 已知时长选项
-Seedance 2.0/Fast/Mini：4s / 6s / 8s / 10s / 15s
-直接回车：默认 6s；Veo 固定默认 8s
+scripts/h_run.sh generate-videos <同一根目录> --video-model <编号> --duration <秒> --video-resolution <分辨率> --aspect-ratio <编号> --reverse-model <编号> --video-reverse-meta-prompt <提示词>
 ```
 
-Legacy example retained only for context:
+视频完成后必须显示：
 
 ```text
-请选择视频时长，回复编号即可：
-1. 4s
-2. 6s
-3. 8s
-直接回车：使用默认 6s
+请选择下一步：
+1. 只重试失败项
+2. 处理新的文件夹
+3. 结束
 ```
 
-## Authentication
+## 单处理
 
-Kie API key lookup order:
+运行 `catalog` 后让用户选择文本、图像或视频模型，并在同一轮收齐该模型需要的 prompt、媒体、比例、分辨率、时长。图像和视频模型根据媒体自动路由：0 图走文生，上传图走图生。
 
-1. `--api-key`
-2. `H_KIE_API_KEY`
-3. `KIE_API_KEY`
-4. `<home>/.codex/secrets/h_kie_api_key.txt`
-5. Plugin-local `.h_api_key`
-
-Do not print API keys. If multiple key sources differ, print only source names plus safe fingerprints, then use the highest-priority source.
-
-## Reverse Text Models
-
-- Default: `gpt-5-5`
-- Fallback: `gpt-5-4`
-- Gemini options:
-  - `gemini-3.1-pro`
-  - `gemini-3-pro`
-  - `gemini-3.5-flash`
-  - `gemini-3-flash`
-
-Request formats:
-
-- `gpt-5-5` and `gpt-5-4` use Kie `/codex/v1/responses` with `input_text` plus `input_image`.
-- Gemini models use Kie `/{model}/v1/chat/completions` with OpenAI-style text plus `image_url` content.
-
-## Image Model Choices
-
-- `1` = GPT Image-2
-- `2` = Nano Banana
-- `3` = Nano Banana Pro
-- `4` = Nano Banana 2
-- `5` = Nano Banana 2 Lite
-- `6` = Seedream 5.0 Lite
-
-Image payload rules:
-
-- The user chooses a model family, not a raw Kie endpoint.
-- The script selects the Kie endpoint from whether an input image is present.
-- If an image is present, use the image/edit endpoint for that model family.
-- If no image is present, use the text-to-image endpoint for that model family when one exists.
-- Only pass source image fields to image/edit endpoints.
-- User-facing image resolution choices must be `1=1K`, `2=2K`, `3=4K`.
-- GPT Image-2 uses `aspect_ratio`.
-- Nano Banana family uses `output_format=png` and the model's documented image field.
-- Seedream 5.0 Lite uses `aspect_ratio`, `quality`, and `nsfw_checker`.
-- Pass resolution only to models whose docs accept resolution.
-
-## Video Model Choices
-
-- `1` = Grok Imagine
-- `2` = Grok Imagine Video 1.5 Preview
-- `3` = Veo3.1 Lite
-- `4` = Veo3.1 Fast
-- `5` = Veo3.1 Quality
-- `6` = Gemini Omni Video
-- `7` = Seedance 2.0
-- `8` = Seedance 2.0 Fast
-- `9` = Seedance 2.0 Mini
-
-Video payload rules:
-
-- The user chooses a video model family, not a raw Kie `text-to-video` / `image-to-video` endpoint.
-- The script selects the Kie endpoint from whether an input image is present.
-- User-facing video model choices must include these confirmed duration rules: Veo3.1 Lite/Fast/Quality fixed about 8s with no manual duration parameter; Grok Imagine max 30s; Grok Imagine Video 1.5 Preview max 15s; Seedance 2.0/Fast/Mini max 15s. If a future Kie model has only example durations, do not treat examples as maximums.
-- User-facing duration choices must be filtered by confirmed maximum supported duration. For Veo3.1, show only fixed 8s.
-- Veo3.1 uses the dedicated Kie Veo endpoint. It supports 0 images as `TEXT_2_VIDEO`, 1-2 images as `FIRST_AND_LAST_FRAMES_2_VIDEO`, and exactly 3 images as `REFERENCE_2_VIDEO`; more than 3 images must fail before submission. Do not send video or audio references to Veo.
-- Grok Imagine uses `grok-imagine/image-to-video` when one processed image is present and `grok-imagine/text-to-video` when no image is present. More than 1 image must fail before submission. Do not send video or audio references to Grok.
-- Grok 1.5 Preview uses `image_urls` only when 1 image is present, plus `aspect_ratio`, `resolution`, and numeric `duration`. More than 1 image or any video/audio reference must fail before submission.
-- Gemini Omni Video uses `image_urls` only when an image is present and always uses `duration`; do not pass unsupported resolution/aspect fields.
-- Seedance 2.0 uses no media for text-to-video, `first_frame_url` for 1 image, `first_frame_url` plus `last_frame_url` for 2 images, and `reference_image_urls` / `reference_video_urls` / `reference_audio_urls` for 3-9 images or any video/audio references. These Seedance scenarios are mutually exclusive.
-- Grok Imagine Video Upscale and Grok Imagine Video Extend are post-processing operations that require an existing Kie task/video; do not list them as primary first-generation model choices unless the workflow explicitly asks for an upscale/extend stage.
-
-## Common Options
-
-Aspect ratio:
-
-- `1` = `9:16`
-- `2` = `16:9`
-
-Prompt variables:
-
-- `{pid}`
-- `{product_id}`
-
-Concurrency:
-
-- `--workers 0` means one worker per image/video under the whole input root, capped at 64.
-- Never process subfolders one at a time unless the user explicitly requests staged folder-by-folder processing.
-
-## Commands
-
-Stage 1:
-
-```bash
-python scripts/h_run.py process-images "/path/to/root" \
-  --image-model 1 \
-  --aspect-ratio 2 \
-  --reverse-model gpt-5-5 \
-  --image-reverse-meta-prompt "将每张产品图片反推为详细的 Kie 图片生成提示词。PID：{pid}"
+```text
+scripts/h_run.sh single --kind <text|image|video> --model <编号> --prompt <提示词> [模型参数]
 ```
 
-Stage 2:
+媒体参数：图片重复使用 `--media`，视频参考重复使用 `--video-ref`，音频参考重复使用 `--audio-ref`；Gemini Omni 使用 `--audio-id` / `--character-id`。Grok Upscale/Extend 只接受之前的 Kie Grok `--source-task-id`，不能上传外部视频冒充任务。
 
-```bash
-python scripts/h_run.py generate-videos "/path/to/root" \
-  --video-model 5 \
-  --aspect-ratio 2 \
-  --reverse-model gpt-5-5 \
-  --video-reverse-meta-prompt "将这张处理后的产品图片反推为 Kie 视频生成提示词。PID：{pid}"
+单处理结束后必须显示返回文件和：
+
+```text
+请选择下一步：
+1. 重试或继续当前任务（已提交任务只查询，不重复提交）
+2. 继续新的单处理
+3. 切换到批处理
+4. 结束
 ```
 
-Windows PowerShell example:
+继续已提交任务：
 
-```powershell
-python .\scripts\h_run.py process-images "C:\path\to\root" `
-  --image-model 1 `
-  --aspect-ratio 2 `
-  --reverse-model gpt-5-5 `
-  --image-reverse-meta-prompt "将每张产品图片反推为详细的 Kie 图片生成提示词。PID：{pid}"
+```text
+scripts/h_run.sh resume <JSON任务记录路径>
 ```
 
-Cross-platform plugin rules:
+## 输入规则
 
-- Python code must use `pathlib.Path`, not hardcoded path separators.
-- Desktop path must be computed as `%USERPROFILE%\Desktop` on Windows and `~/Desktop` on macOS.
-- Do not depend on Windows-only shell syntax in the plugin logic.
-- Keep command examples for both POSIX shells and Windows PowerShell.
+- Veo：0 图文生；1-2 图首尾帧；3 图仅 Lite/Fast 参考图；超过 3 图报错；不允许视频/音频。
+- Grok：0 图文生；1 图图生；超过 1 图报错；不允许视频/音频。
+- Seedance：0 图文生；1 图首帧；2 图首尾帧；3-9 图或含视频/音频时走多模态参考。
+- Gemini Omni：`图片数 + 2 * 视频数 + 角色ID数 <= 7`，视频最多 1 个，角色 ID 最多 3 个；音频必须是 Kie audio ID。
+- 图片下载必须通过真实图片文件头校验；视频必须通过 MP4/WebM 文件头校验。HTML、原始上传 URL 或伪扩展名都算失败。
 
-## Failure Memory
+## 输出与状态
 
-The previous failure was caused by combining three mistakes:
+默认输出：
 
-1. Reverse prompting was not consistently using the actual source image through the intended provider.
-2. Batch submission was effectively too serialized for whole-folder work.
-3. Kie result parsing could mistake an original/source URL for the generated output URL.
+```text
+<home>/Desktop/H返回结果_<根目录名>/
+  文本/
+  图像/
+  视频/
 
-The fixed behavior is:
+<home>/Desktop/H返回结果_单处理/
+  文本/
+  图像/
+  视频/
+```
 
-- Kie-only reverse prompt and generation.
-- Whole-root concurrent submission.
-- Model-specific request formats.
-- Immediate reverse prompt caching.
-- Strict generated URL validation.
-- Desktop/output-root result format with separate `文本`, `图像`, and `视频` folders.
+提交成功后立即保存 `task_id`、请求签名和预期输出路径。网络中断或超时保留为可续跑状态。只有签名匹配且文件头有效的结果才能命中缓存；更换原图、模型、提示词、比例或分辨率必须重新生成。
+
+命令退出码 `2` 表示批次部分失败，不是整批崩溃。读取末尾 JSON 汇总后向用户报告结果并继续显示下一步，绝不能生成完一次就直接结束对话。

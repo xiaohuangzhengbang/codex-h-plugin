@@ -1,115 +1,125 @@
 # H Codex Plugin
 
-Portable pure-Kie Codex plugin for batch and single image/video workflows.
+H is a Kie-only Codex plugin with two user-facing modes:
 
-This repository is a Codex plugin root. It contains:
+1. Batch processing: recursively process every eligible PID image under one root with whole-root concurrency.
+2. Single processing: call one selected Kie text, image, video, upscale, or extend model.
 
-```text
-.codex-plugin/plugin.json
-skills/
-scripts/
-assets/
-requirements.txt
-```
+## Install From GitHub
 
-## Install From Git URL
-
-In Codex, install a plugin from this Git URL:
+Add this repository as a Codex plugin marketplace:
 
 ```text
 https://github.com/xiaohuangzhengbang/codex-h-plugin.git
 ```
 
-After install, enable plugin `H`.
+CLI equivalent:
+
+```bash
+codex plugin marketplace add https://github.com/xiaohuangzhengbang/codex-h-plugin.git
+```
+
+Then install or enable `h` from the `codex-h-plugin` marketplace. The repository root already contains both `.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json`.
 
 ## First Use
 
-On first use, H should run its bootstrap check:
+H supports Windows, Intel Mac, and Apple Silicon Mac. Its launcher creates one reusable environment under `<home>/.codex/cache/h`; plugin updates do not reinstall dependencies unless `requirements.txt` changes.
+
+Windows:
+
+```powershell
+scripts\h_run.cmd doctor
+```
+
+macOS:
 
 ```bash
-python scripts/h_run.py --doctor
+./scripts/h_run.sh doctor
 ```
 
-The doctor command prepares:
-
-- plugin-local `.h_venv`
-- `requests>=2.32,<3`
-- Desktop output availability
-- Kie key source detection
-
-Successful doctor output contains:
-
-```json
-{
-  "ready": true
-}
-```
+Requirements are Python 3.10+, Python `venv`, and network access on the first run. Runtime dependencies are installed automatically.
 
 ## Kie Key
 
-Do not commit API keys.
-
-Recommended key file:
+API keys are never stored in Git. Configure one source once:
 
 ```text
+H_KIE_API_KEY
+KIE_API_KEY
 <home>/.codex/secrets/h_kie_api_key.txt
 ```
 
-macOS example:
+The launcher also provides an interactive local setup command:
 
 ```bash
-mkdir -p ~/.codex/secrets
-printf '%s' 'YOUR_KIE_KEY' > ~/.codex/secrets/h_kie_api_key.txt
+./scripts/h_run.sh set-key
 ```
 
-Windows PowerShell example:
+On Windows, use `scripts\h_run.cmd set-key`.
 
-```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\secrets" | Out-Null
-Set-Content -NoNewline "$env:USERPROFILE\.codex\secrets\h_kie_api_key.txt" "YOUR_KIE_KEY"
+## Commands
+
+List all models and their constraints without using a Kie key:
+
+```bash
+./scripts/h_run.sh catalog
 ```
 
-## Modes
+Batch images:
 
-H has two modes:
-
-```text
-1. Batch processing
-2. Single processing
+```bash
+./scripts/h_run.sh process-images "/path/to/root" \
+  --image-model 1 --image-resolution 1 --aspect-ratio 2 \
+  --reverse-model 1 \
+  --image-reverse-meta-prompt "Reverse this product image for Kie. PID: {pid}"
 ```
 
-Batch mode processes all eligible files under a folder concurrently.
+Batch videos:
 
-Single mode calls one selected Kie model once with one prompt and supplied media.
+```bash
+./scripts/h_run.sh generate-videos "/path/to/root" \
+  --video-model 3 --video-resolution 720p --aspect-ratio 2 \
+  --reverse-model 1 \
+  --video-reverse-meta-prompt "Reverse this processed image into a Kie video prompt. PID: {pid}"
+```
+
+Single call:
+
+```bash
+./scripts/h_run.sh single --kind image --model 1 --prompt "Product lookbook photo" --media "/path/to/reference.png"
+```
+
+Resume an already submitted task without paying for a duplicate submission:
+
+```bash
+./scripts/h_run.sh resume "/path/to/task-record.json"
+```
 
 ## Output
 
-By default, H writes to:
+Batch results:
 
 ```text
-<home>/Desktop/H_results_<input-folder-name>/
+<home>/Desktop/H返回结果_<input-name>/
+  文本/
+  图像/
+  视频/
 ```
 
-The runtime script may create localized subfolders for text, images, and videos.
-
-## Run Commands
-
-Use the portable launcher:
-
-```bash
-python scripts/h_run.py ...
-```
-
-Do not run `scripts/kie_video_batch.py` directly unless debugging.
-
-## Safety
-
-Ignored by git:
+Single results:
 
 ```text
-.h_api_key
-.h_ready.json
-.h_venv/
-__pycache__/
-*.pyc
+<home>/Desktop/H返回结果_单处理/
+  文本/
+  图像/
+  视频/
 ```
+
+Every submitted item records its `task_id` immediately. Reruns reuse valid prompt caches, resume pending tasks, and only regenerate when the source or request parameters changed. Batch exit code `2` means partial failure; the JSON summary contains exact PID-level causes and next actions.
+
+## Security
+
+- TLS certificate verification remains enabled.
+- Downloaded images and videos are checked by file signature before being accepted.
+- Keys are logged only as short SHA-256 fingerprints.
+- Rotate any key that was ever pasted into a public repository or shared transcript.

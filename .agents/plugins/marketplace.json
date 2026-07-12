@@ -1,0 +1,21 @@
+{
+  "name": "codex-h-plugin",
+  "interface": {
+    "displayName": "H Plugin"
+  },
+  "plugins": [
+    {
+      "name": "h",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/xiaohuangzhengbang/codex-h-plugin.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

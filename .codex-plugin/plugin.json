@@ -1,7 +1,7 @@
 {
   "name": "h",
-  "version": "0.2.0+codex.20260622052519",
-  "description": "Portable pure-Kie batch and single-call workflow for image/video generation.",
+  "version": "0.2.0+codex.20260712111147",
+  "description": "Portable Kie-only batch and single-call workflow for text, image, and video generation.",
   "author": {
     "name": "XIAOH"
   },
@@ -16,19 +16,20 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "H",
-    "shortDescription": "Pure Kie batch or single-call image/video workflow with portable dependency bootstrap.",
-    "longDescription": "H runs Kie-only image and video workflows in two modes: batch processing for folders and single processing for one selected model call. It reverse-prompts through Kie multimodal text models, submits all eligible batch items concurrently, writes results to Desktop folders, and uses a plugin-local Python environment so the workflow can run on Windows and macOS without manual dependency setup.",
+    "shortDescription": "Kie text, image, and video work in concurrent batch or single mode.",
+    "longDescription": "H runs Kie-only workflows in two modes: recursive whole-folder batch processing and one-model single processing. It reverse-prompts with Kie multimodal text models, submits all eligible PID items concurrently, saves task IDs for safe resume, validates downloaded media, writes Desktop text/image/video folders, and bootstraps one reusable user-level Python environment on Windows and Intel or Apple Silicon macOS.",
     "developerName": "XIAOH",
     "category": "Productivity",
     "capabilities": [
       "Image Editing",
       "Video Generation",
+      "Text Generation",
       "Batch Processing"
     ],
     "defaultPrompt": [
-      "Batch reverse and process PID product folders.",
-      "Generate videos from processed images with reverse prompts.",
-      "Run the full Kie product video workflow."
+      "\u4f7f\u7528 H \u6279\u91cf\u5904\u7406\u6574\u4e2a PID \u4ea7\u54c1\u6587\u4ef6\u5939\u3002",
+      "\u4f7f\u7528 H \u5355\u72ec\u8c03\u7528\u4e00\u4e2a Kie \u6587\u672c\u3001\u56fe\u50cf\u6216\u89c6\u9891\u6a21\u578b\u3002",
+      "\u4f7f\u7528 H \u7ee7\u7eed\u5df2\u4fdd\u5b58\u7684 Kie \u751f\u6210\u4efb\u52a1\u3002"
     ],
     "brandColor": "#185E70",
     "composerIcon": "./assets/icon.png",

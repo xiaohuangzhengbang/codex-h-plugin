@@ -9,19 +9,19 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import ipaddress
+import hashlib
 import json
 import os
+import random
 import re
-import socket
-import ssl
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import requests
 
@@ -29,11 +29,15 @@ import requests
 KIE_API_HOST = "https://api.kie.ai"
 KIE_FILE_HOST = "https://kieai.redpandaai.co"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_API_KEY_FILE = PLUGIN_ROOT / ".h_api_key"
 USER_API_KEY_FILE = Path.home() / ".codex" / "secrets" / "h_kie_api_key.txt"
 _PROXY_CACHE: dict[str, str] | None = None
-_KIE_SUBMIT_LOCK = threading.Lock()
+_SESSION_LOCAL = threading.local()
+TRANSIENT_HTTP_STATUSES = {429, 455, 500, 502, 503, 504}
+RESUMABLE_STATES = {"submitted", "waiting", "queueing", "generating", "timeout"}
 
 IMAGE_MODEL_PAYLOADS = {
     "gpt-image-2-text-to-image": "",
@@ -58,7 +62,7 @@ IMAGE_MODEL_CHOICES = {
 
 VIDEO_MODEL_CHOICES = {
     "1": ("Grok Imagine", "grok-imagine"),
-    "2": ("Grok Imagine 1.5 Preview", "grok-imagine-video-1-5-preview"),
+    "2": ("Grok Imagine Video 1.5 Preview", "grok-imagine-video-1-5-preview"),
     "3": ("Veo3.1 Lite", "veo3.1-lite"),
     "4": ("Veo3.1 Fast", "veo3.1-fast"),
     "5": ("Veo3.1 Quality", "veo3.1-quality"),
@@ -66,7 +70,11 @@ VIDEO_MODEL_CHOICES = {
     "7": ("Seedance 2.0", "bytedance/seedance-2"),
     "8": ("Seedance 2.0 Fast", "bytedance/seedance-2-fast"),
     "9": ("Seedance 2.0 Mini", "bytedance/seedance-2-mini"),
+    "10": ("Grok Imagine Video Upscale", "grok-imagine/upscale"),
+    "11": ("Grok Imagine Video Extend", "grok-imagine/extend"),
 }
+
+VIDEO_TRANSFORM_MODELS = {"grok-imagine/upscale", "grok-imagine/extend"}
 
 VIDEO_MODEL_MAX_SECONDS = {
     "grok-imagine": 30,
@@ -80,6 +88,8 @@ VIDEO_MODEL_MAX_SECONDS = {
     "bytedance/seedance-2": 15,
     "bytedance/seedance-2-fast": 15,
     "bytedance/seedance-2-mini": 15,
+    "grok-imagine/upscale": None,
+    "grok-imagine/extend": None,
 }
 VEO_FIXED_SECONDS = 8
 VIDEO_DURATION_CHOICES = [4, 6, 8, 10, 15, 20, 25, 30]
@@ -116,25 +126,29 @@ REVERSE_MODEL_CHOICES = {
     "gemini-3-flash": "gemini-3-flash",
 }
 
+TEXT_MODEL_CHOICES = {
+    "1": ("GPT 5.5 Response", "gpt-5-5"),
+    "2": ("GPT 5.4 Response", "gpt-5-4"),
+    "3": ("Gemini 3.1 Pro", "gemini-3.1-pro"),
+    "4": ("Gemini 3 Pro", "gemini-3-pro"),
+    "5": ("Gemini 3.5 Flash", "gemini-3-5-flash-openai"),
+    "6": ("Gemini 3 Flash", "gemini-3-flash"),
+}
 
-class LegacyTLSAdapter(requests.adapters.HTTPAdapter):
-    """Adapter for proxy/TUN routes that require OpenSSL legacy server connect."""
 
-    def _ssl_context(self) -> ssl.SSLContext:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
-            context.options |= ssl.OP_LEGACY_SERVER_CONNECT
-        return context
-
-    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
-        pool_kwargs["ssl_context"] = self._ssl_context()
-        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
-
-    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
-        proxy_kwargs["ssl_context"] = self._ssl_context()
-        return super().proxy_manager_for(proxy, **proxy_kwargs)
+class KieAPIError(RuntimeError):
+    def __init__(
+        self,
+        category: str,
+        message: str,
+        *,
+        status: int | None = None,
+        resumable: bool | None = None,
+    ) -> None:
+        self.category = category
+        self.status = status
+        self.resumable = resumable
+        super().__init__(f"[{category}] {message}")
 
 
 @dataclass
@@ -148,6 +162,13 @@ class ProductFolder:
     name: str
     path: Path
     images: list[ProductImage]
+    relative_path: Path = Path(".")
+
+    @property
+    def output_path(self) -> Path:
+        if self.relative_path == Path("."):
+            return Path(sanitize_filename(self.name))
+        return Path(*(sanitize_filename(part) for part in self.relative_path.parts))
 
 
 def sanitize_filename(value: str) -> str:
@@ -163,15 +184,47 @@ def pid_from_path(path: Path) -> str:
 
 
 def collect_images(folder: Path) -> list[ProductImage]:
-    images = []
+    images: list[ProductImage] = []
+    seen: dict[str, Path] = {}
     for item in sorted(folder.iterdir(), key=lambda path: path.name.lower()):
         if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS:
-            images.append(ProductImage(pid_from_path(item), item))
+            pid = pid_from_path(item)
+            if pid in seen:
+                raise ValueError(f"Duplicate PID '{pid}' in {folder}: {seen[pid].name} and {item.name}")
+            seen[pid] = item
+            images.append(ProductImage(pid, item))
     return images
 
 
-def should_skip_folder(folder: Path) -> bool:
-    return folder.name.lower() in {"processed_products", "videos", "__pycache__"}
+def iter_image_directories(input_dir: Path, *, processed: bool) -> list[Path]:
+    skipped = {"videos", "__pycache__", ".git", ".h_venv", "文本", "视频"}
+    if not processed:
+        skipped.update({"processed_products", "图像"})
+    directories: list[Path] = []
+    for current, child_names, _file_names in os.walk(input_dir, followlinks=False):
+        child_names[:] = sorted(
+            [
+                name
+                for name in child_names
+                if name.lower() not in skipped and not name.startswith(".")
+            ],
+            key=str.lower,
+        )
+        folder = Path(current)
+        if folder.is_symlink():
+            child_names[:] = []
+            continue
+        directories.append(folder)
+    return directories
+
+
+def product_folder_for(input_dir: Path, folder: Path, images: list[ProductImage]) -> ProductFolder:
+    relative = folder.relative_to(input_dir)
+    if relative == Path("."):
+        name = input_dir.name
+    else:
+        name = relative.as_posix()
+    return ProductFolder(sanitize_filename(name), folder, images, relative)
 
 
 def discover_product_folders(input_dir: Path) -> list[ProductFolder]:
@@ -180,14 +233,10 @@ def discover_product_folders(input_dir: Path) -> list[ProductFolder]:
         raise FileNotFoundError(str(input_dir))
 
     folders: list[ProductFolder] = []
-    root_images = collect_images(input_dir)
-    if root_images:
-        folders.append(ProductFolder(sanitize_filename(input_dir.name), input_dir, root_images))
-
-    for child in sorted([item for item in input_dir.iterdir() if item.is_dir() and not should_skip_folder(item)], key=lambda item: item.name.lower()):
-        images = collect_images(child)
+    for folder in iter_image_directories(input_dir, processed=False):
+        images = collect_images(folder)
         if images:
-            folders.append(ProductFolder(sanitize_filename(child.name), child, images))
+            folders.append(product_folder_for(input_dir, folder, images))
 
     return folders
 
@@ -198,27 +247,35 @@ def discover_processed_folders(input_dir: Path) -> list[ProductFolder]:
         raise FileNotFoundError(str(input_dir))
 
     folders: list[ProductFolder] = []
-    direct_images = collect_images(input_dir)
-    if direct_images:
-        name = input_dir.parent.name if input_dir.name.lower() == "processed_products" else input_dir.name
-        folders.append(ProductFolder(sanitize_filename(name), input_dir, direct_images))
-
-    for child in sorted([item for item in input_dir.iterdir() if item.is_dir() and not should_skip_folder(item)], key=lambda item: item.name.lower()):
-        processed = child / "processed_products"
-        if processed.is_dir():
-            images = collect_images(processed)
-            if images:
-                folders.append(ProductFolder(sanitize_filename(child.name), processed, images))
-            continue
-        images = collect_images(child)
+    for folder in iter_image_directories(input_dir, processed=True):
+        images = collect_images(folder)
         if images:
-            folders.append(ProductFolder(sanitize_filename(child.name), child, images))
+            record = product_folder_for(input_dir, folder, images)
+            if folder.name.lower() == "processed_products":
+                parent_relative = folder.parent.relative_to(input_dir)
+                record = ProductFolder(
+                    sanitize_filename(folder.parent.name),
+                    folder,
+                    images,
+                    parent_relative,
+                )
+            folders.append(record)
 
     return folders
 
 
 def desktop_dir() -> Path:
     if os.name == "nt":
+        try:
+            import winreg
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                value, _ = winreg.QueryValueEx(key, "Desktop")
+                if value:
+                    return Path(os.path.expandvars(str(value))).expanduser()
+        except (OSError, ImportError):
+            pass
         return Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
     return Path.home() / "Desktop"
 
@@ -233,27 +290,33 @@ def output_root(args: argparse.Namespace, input_dir: Path) -> Path:
 
 def process_output_dir(args: argparse.Namespace, source_root: Path, folder: ProductFolder, multi_folder: bool) -> Path:
     base = output_root(args, source_root) / "图像"
-    return base / folder.name if multi_folder else base
+    return base / folder.output_path if multi_folder else base
 
 
 def process_text_output_dir(args: argparse.Namespace, source_root: Path, folder: ProductFolder, multi_folder: bool) -> Path:
     base = output_root(args, source_root) / "文本"
-    return base / folder.name if multi_folder else base
+    return base / folder.output_path if multi_folder else base
 
 
 def video_output_dir(args: argparse.Namespace, source_root: Path, folder: ProductFolder, multi_folder: bool) -> Path:
     base = output_root(args, source_root) / "视频"
-    return base / folder.name if multi_folder else base
+    return base / folder.output_path if multi_folder else base
 
 
 def video_text_output_dir(args: argparse.Namespace, source_root: Path, folder: ProductFolder, multi_folder: bool) -> Path:
     base = output_root(args, source_root) / "文本"
-    return base / folder.name if multi_folder else base
+    return base / folder.output_path if multi_folder else base
 
 
 def clean_api_key(api_key: str) -> str:
     value = (api_key or "").strip().lstrip("\ufeff")
-    return "".join(ch for ch in value if ch.isprintable() and ch not in {"\ufeff", "\u200b", "\u200c", "\u200d", "\u2060"})
+    return "".join(
+        ch
+        for ch in value
+        if ch.isprintable()
+        and not ch.isspace()
+        and ch not in {"\ufeff", "\u200b", "\u200c", "\u200d", "\u2060"}
+    )
 
 
 def get_headers(api_key: str) -> dict[str, str]:
@@ -264,16 +327,24 @@ def get_headers(api_key: str) -> dict[str, str]:
 
 
 def new_session() -> requests.Session:
+    cached = getattr(_SESSION_LOCAL, "session", None)
+    if isinstance(cached, requests.Session):
+        return cached
     session = requests.Session()
-    session.trust_env = False
-    session.verify = False
+    session.trust_env = True
+    session.verify = True
     proxies = configured_proxies()
     if proxies:
         session.proxies.update(proxies)
     retry = requests.adapters.Retry(total=0)
-    adapter = LegacyTLSAdapter(max_retries=retry)
+    adapter = requests.adapters.HTTPAdapter(
+        max_retries=retry,
+        pool_connections=64,
+        pool_maxsize=64,
+    )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    _SESSION_LOCAL.session = session
     return session
 
 
@@ -351,15 +422,14 @@ def upload_file(api_key: str, path: Path) -> str:
             data={"uploadPath": "codex-kie-product-video", "fileName": path.name},
             files={"file": (path.name, file_obj)},
             timeout=120,
-            verify=False,
             attempts=5,
             base_delay=2,
         )
-    response.raise_for_status()
-    data = response.json()
+    raise_for_kie_status(response, "file upload")
+    data = response_json(response, "file upload")
     if data.get("success") and data.get("data", {}).get("downloadUrl"):
         return data["data"]["downloadUrl"]
-    raise RuntimeError(data.get("message") or data.get("msg") or f"Upload failed: {path}")
+    raise KieAPIError("upload", str(data.get("message") or data.get("msg") or f"Upload failed: {path}"))
 
 
 
@@ -367,8 +437,8 @@ def describe_secret(value: str) -> str:
     value = clean_api_key(value)
     if not value:
         return "empty"
-    tail = value[-6:] if len(value) >= 6 else value
-    return f"len={len(value)} tail={tail}"
+    fingerprint = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"sha256={fingerprint}"
 
 
 def choose_secret(candidates: list[tuple[str, str]], label: str) -> str:
@@ -397,6 +467,25 @@ def response_output_text(data: dict[str, Any]) -> str:
         return "\n".join(texts).strip()
     if data.get("output_text"):
         return str(data["output_text"]).strip()
+    for choice in data.get("choices", []) or []:
+        if not isinstance(choice, dict):
+            continue
+        content = (choice.get("message") or {}).get("content")
+        if isinstance(content, str) and content.strip():
+            texts.append(content.strip())
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("text"):
+                    texts.append(str(part["text"]).strip())
+    for candidate in data.get("candidates", []) or []:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content") or {}
+        for part in content.get("parts", []) or []:
+            if isinstance(part, dict) and part.get("text"):
+                texts.append(str(part["text"]).strip())
+    if texts:
+        return "\n".join(text for text in texts if text).strip()
     return ""
 
 
@@ -405,83 +494,108 @@ def normalize_reverse_model(value: str) -> str:
     return REVERSE_MODEL_CHOICES.get(model, model)
 
 
+def resolve_text_model(value: str) -> tuple[str, str]:
+    if value in TEXT_MODEL_CHOICES:
+        return TEXT_MODEL_CHOICES[value]
+    normalized = normalize_reverse_model(value)
+    for label, model in TEXT_MODEL_CHOICES.values():
+        if normalized == model or value.lower() == label.lower():
+            return label, model
+    raise ValueError(f"Unsupported text model choice: {value}")
+
+
+def text_request_payload(model: str, prompt: str, media_urls: list[str], reasoning_effort: str) -> tuple[str, dict[str, Any]]:
+    if model in {"gpt-5-4", "gpt-5-5"}:
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        content.extend({"type": "input_image", "image_url": url} for url in media_urls)
+        return "/codex/v1/responses", {
+            "model": model,
+            "stream": False,
+            "reasoning": {"effort": reasoning_effort},
+            "input": [{"role": "user", "content": content}],
+        }
+    content = [{"type": "text", "text": prompt}]
+    content.extend({"type": "image_url", "image_url": {"url": url}} for url in media_urls)
+    return f"/{model}/v1/chat/completions", {
+        "stream": False,
+        "reasoning_effort": reasoning_effort,
+        "messages": [{"role": "user", "content": content}],
+    }
+
+
+def text_with_kie(
+    api_key: str,
+    model: str,
+    prompt: str,
+    media_urls: list[str] | None = None,
+    *,
+    base_url: str = KIE_API_HOST,
+    timeout: int = 180,
+    reasoning_effort: str = "high",
+) -> tuple[str, dict[str, Any]]:
+    selected = normalize_reverse_model(model)
+    candidates = [selected, "gpt-5-4"] if selected == "gpt-5-5" else [selected]
+    last_error: Exception | None = None
+    last_data: dict[str, Any] = {}
+    for index, candidate in enumerate(candidates):
+        endpoint_path, payload = text_request_payload(candidate, prompt, media_urls or [], reasoning_effort)
+        endpoint = f"{base_url.rstrip('/')}{endpoint_path}"
+        try:
+            for empty_attempt in range(2):
+                response = request_with_retry(
+                    "POST",
+                    endpoint,
+                    headers=get_headers(api_key),
+                    json=payload,
+                    timeout=timeout,
+                    attempts=3,
+                    base_delay=2,
+                )
+                raise_for_kie_status(response, f"text model {candidate}")
+                data = response_json(response, f"text model {candidate}")
+                raise_for_kie_code(data, f"text model {candidate}")
+                last_data = data
+                content = response_output_text(data)
+                if content:
+                    result = dict(data)
+                    result["_h_meta"] = {
+                        "requested_model": selected,
+                        "actual_model": candidate,
+                        "fallback_used": candidate != selected,
+                    }
+                    return content, result
+                if empty_attempt == 0:
+                    time.sleep(1)
+            raise KieAPIError("invalid_response", f"text model {candidate} returned no text")
+        except KieAPIError as exc:
+            last_error = exc
+            can_fallback = index + 1 < len(candidates) and exc.category in {
+                "provider",
+                "maintenance",
+                "rate_limit",
+                "feature_disabled",
+                "invalid_response",
+                "network",
+            }
+            if not can_fallback:
+                raise
+            print(f"{candidate} temporarily unavailable; falling back to {candidates[index + 1]}: {exc}", flush=True)
+    if last_error:
+        raise last_error
+    raise KieAPIError("invalid_response", f"text generation returned no content: {last_data}")
+
+
 def reverse_prompt_with_kie(args: argparse.Namespace, pid: str, image_url: str, meta_prompt_template: str) -> tuple[str, dict[str, Any]]:
     meta_prompt = meta_prompt_template.format(pid=pid, product_id=pid)
-    base_url = args.reverse_base_url.rstrip("/") if args.reverse_base_url else KIE_API_HOST
-    reverse_model = normalize_reverse_model(args.reverse_model)
-    use_responses_api = reverse_model in {"gpt-5-4", "gpt-5-5"} or args.reverse_api == "responses"
-    if use_responses_api:
-        endpoint = f"{base_url}/codex/v1/responses"
-        payload = {
-            "model": reverse_model,
-            "stream": False,
-            "reasoning": {"effort": args.reverse_reasoning_effort},
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": meta_prompt},
-                        {"type": "input_image", "image_url": image_url},
-                    ],
-                }
-            ],
-        }
-    else:
-        endpoint = f"{base_url}/{reverse_model}/v1/chat/completions"
-        payload = {
-            "stream": False,
-            "reasoning_effort": args.reverse_reasoning_effort,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": meta_prompt},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
-                }
-            ],
-        }
-    last_data: dict[str, Any] = {}
-    reverse_attempts = 8
-    for attempt in range(1, reverse_attempts + 1):
-        response = request_with_retry(
-            "POST",
-            endpoint,
-            headers=get_headers(args.api_key),
-            json=payload,
-            timeout=args.reverse_timeout,
-        )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            body = response.text[:1000]
-            transient = (
-                response.status_code in {429, 500, 502, 503, 504}
-                or "Too many pending requests" in body
-                or "Unable to download content" in body
-                or "system cpu overloaded" in body
-                or "frequency" in body.lower()
-                or "retry later" in body.lower()
-            )
-            if transient and attempt < reverse_attempts:
-                delay = min(45, (2 ** attempt) + (attempt * 3))
-                print(f"Kie reverse transient error ({attempt}/{reverse_attempts}); retrying in {delay}s: {response.status_code} {body}", flush=True)
-                time.sleep(delay)
-                continue
-            raise RuntimeError(f"Kie reverse request failed: {response.status_code} {body}") from exc
-        data = response.json()
-        last_data = data
-        if use_responses_api:
-            content = response_output_text(data)
-        else:
-            content = data.get("choices", [{}])[0].get("message", {}).get("content")
-        if content:
-            return str(content).strip(), data
-        if attempt < reverse_attempts:
-            delay = min(30, 2 ** attempt)
-            print(f"Kie reverse response missing content ({attempt}/{reverse_attempts}); retrying in {delay}s", flush=True)
-            time.sleep(delay)
-    raise RuntimeError(f"Kie reverse response missing content: {last_data}")
+    return text_with_kie(
+        args.api_key,
+        args.reverse_model,
+        meta_prompt,
+        [image_url],
+        base_url=args.reverse_base_url or KIE_API_HOST,
+        timeout=args.reverse_timeout,
+        reasoning_effort=args.reverse_reasoning_effort,
+    )
 
 
 def build_kie_image_prompt(reverse_prompt: str, pid: str, extra_prompt: str) -> str:
@@ -508,99 +622,167 @@ def resolve_workers(requested: int, item_count: int) -> int:
     return max(1, min(item_count, 64))
 
 
-def host_ips(url: str) -> list[str]:
-    host = urlparse(url).hostname or url
-    try:
-        return sorted({item[4][0] for item in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
-    except OSError:
-        return []
-
-
-def is_benchmark_tun_ip(value: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return ip.version == 4 and ipaddress.ip_address("198.18.0.0") <= ip <= ipaddress.ip_address("198.19.255.255")
-
-
 def assert_kie_reachable(args: argparse.Namespace) -> None:
     if getattr(args, "skip_preflight", False):
         return
-    ips = host_ips(KIE_API_HOST)
-    proxies = configured_proxies()
-    tun_note = ""
-    if any(is_benchmark_tun_ip(ip) for ip in ips):
-        tun_note = f" DNS resolved {KIE_API_HOST} to {', '.join(ips)}, which is a 198.18/15 proxy/TUN range."
-        if proxies:
-            print(f"Kie preflight: fake-ip DNS detected; using configured proxy route for {KIE_API_HOST}.", flush=True)
-        else:
-            raise RuntimeError(
-                "Kie API preflight failed before starting batch work."
-                f"{tun_note} No HTTP/HTTPS proxy is configured for this process. "
-                "Configure the local proxy route for api.kie.ai, then rerun; completed PID outputs will be skipped automatically. "
-                "Use --skip-preflight only if you know this route is healthy."
-            )
+    credits = check_kie_account(args.api_key, timeout=args.preflight_timeout)
+    print(f"Kie preflight passed; available credits: {credits}", flush=True)
+
+
+def kie_error_category(status: int | None) -> str:
+    if status == 401:
+        return "authentication"
+    if status == 403:
+        return "authorization"
+    if status == 402:
+        return "quota"
+    if status in {400, 422}:
+        return "validation"
+    if status == 404:
+        return "not_found"
+    if status == 409:
+        return "conflict"
+    if status == 429:
+        return "rate_limit"
+    if status in {455, 503}:
+        return "maintenance"
+    if status == 505:
+        return "feature_disabled"
+    if status is not None and status >= 500:
+        return "provider"
+    return "request"
+
+
+def response_message(response: requests.Response) -> str:
+    body = response.text.strip()[:1200]
+    if not body:
+        return response.reason or f"HTTP {response.status_code}"
     try:
-        response = request_with_retry(
-            "GET",
-            KIE_API_HOST,
-            attempts=2 if proxies else 1,
-            base_delay=1,
-            timeout=args.preflight_timeout,
-        )
-        response.close()
-    except requests.RequestException as exc:
-        proxy_note = " A configured proxy was detected and tried." if proxies else " No configured proxy was detected."
-        raise RuntimeError(
-            "Kie API preflight failed before starting batch work."
-            f"{tun_note}{proxy_note} Current connection error: {exc}. "
-            "Fix the proxy/network route for api.kie.ai, then rerun; completed PID outputs will be skipped automatically."
-        ) from exc
+        data = response.json()
+    except (ValueError, requests.JSONDecodeError):
+        return body
+    if isinstance(data, dict):
+        return str(data.get("msg") or data.get("message") or data.get("error") or body)
+    return body
+
+
+def response_json(response: requests.Response, operation: str) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except (ValueError, requests.JSONDecodeError) as exc:
+        raise KieAPIError("invalid_response", f"{operation} returned non-JSON data: {response.text[:500]}") from exc
+    if not isinstance(data, dict):
+        raise KieAPIError("invalid_response", f"{operation} returned a non-object JSON response")
+    return data
+
+
+def raise_for_kie_status(response: requests.Response, operation: str) -> None:
+    if response.status_code < 400:
+        return
+    category = kie_error_category(response.status_code)
+    raise KieAPIError(
+        category,
+        f"{operation} failed with HTTP {response.status_code}: {response_message(response)}",
+        status=response.status_code,
+    )
+
+
+def raise_for_kie_code(data: dict[str, Any], operation: str) -> None:
+    raw_code = data.get("code")
+    if raw_code in {None, 200, "200"}:
+        return
+    try:
+        status = int(raw_code)
+    except (TypeError, ValueError):
+        status = None
+    category = kie_error_category(status)
+    message = str(data.get("msg") or data.get("message") or data.get("error") or "unknown Kie error")
+    raise KieAPIError(category, f"{operation} failed with Kie code {raw_code}: {message}", status=status)
+
+
+def check_kie_account(api_key: str, *, timeout: int = 15) -> float:
+    response = request_with_retry(
+        "GET",
+        f"{KIE_API_HOST}/api/v1/chat/credit",
+        headers=get_headers(api_key),
+        attempts=3,
+        base_delay=1,
+        timeout=timeout,
+    )
+    raise_for_kie_status(response, "credit check")
+    data = response_json(response, "credit check")
+    raise_for_kie_code(data, "credit check")
+    try:
+        credits = float(data.get("data"))
+    except (TypeError, ValueError) as exc:
+        raise KieAPIError("invalid_response", f"credit check returned an invalid balance: {data.get('data')!r}") from exc
+    if credits <= 0:
+        raise KieAPIError("quota", "Kie account has no available credits", status=402)
+    return credits
 
 
 def request_with_retry(method: str, url: str, *, attempts: int = 3, base_delay: float = 2.0, **kwargs: Any) -> requests.Response:
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            return new_session().request(method, url, **kwargs)
+            response = new_session().request(method, url, **kwargs)
         except requests.RequestException as exc:
             last_exc = exc
             if attempt == attempts:
                 break
-            delay = min(20, base_delay * (2 ** (attempt - 1)))
+            delay = min(20.0, base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.5)
             print(f"Transient request error ({attempt}/{attempts}); retrying in {delay}s: {exc}", flush=True)
             time.sleep(delay)
+            continue
+        if response.status_code in TRANSIENT_HTTP_STATUSES and attempt < attempts:
+            message = response_message(response)
+            response.close()
+            delay = min(30.0, base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.5)
+            print(
+                f"Transient Kie HTTP error ({attempt}/{attempts}); retrying in {delay:.1f}s: "
+                f"{response.status_code} {message}",
+                flush=True,
+            )
+            time.sleep(delay)
+            continue
+        return response
     assert last_exc is not None
-    raise last_exc
+    raise KieAPIError("network", f"request failed after {attempts} attempts: {last_exc}") from last_exc
 
 
 def submit_job(api_key: str, model: str, input_payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    submit_attempts = 8
+    submit_attempts = 4
     data: dict[str, Any] = {}
     for attempt in range(1, submit_attempts + 1):
-        with _KIE_SUBMIT_LOCK:
-            response = request_with_retry(
-                "POST",
-                f"{KIE_API_HOST}/api/v1/jobs/createTask",
-                headers=get_headers(api_key),
-                json={"model": model, "input": input_payload},
-                timeout=60,
-                attempts=8,
-                base_delay=2,
-            )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code") == 200:
+        response = request_with_retry(
+            "POST",
+            f"{KIE_API_HOST}/api/v1/jobs/createTask",
+            headers=get_headers(api_key),
+            json={"model": model, "input": input_payload},
+            timeout=60,
+            attempts=4,
+            base_delay=2,
+        )
+        raise_for_kie_status(response, f"submit {model}")
+        data = response_json(response, f"submit {model}")
+        if data.get("code") in {200, "200"}:
             break
         message = str(data.get("msg") or data.get("message") or "")
-        transient = any(token in message.lower() for token in ["frequency", "too high", "retry later", "rate limit"])
+        code = data.get("code")
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            status = None
+        transient = status in TRANSIENT_HTTP_STATUSES or any(
+            token in message.lower()
+            for token in ["frequency", "too high", "retry later", "rate limit", "overloaded"]
+        )
         if transient and attempt < submit_attempts:
-            delay = min(60, 5 * attempt)
-            print(f"Kie task submission transient error ({attempt}/{submit_attempts}); retrying in {delay}s: {message}", flush=True)
+            delay = min(30.0, 3 * attempt) + random.uniform(0, 0.5)
+            print(f"Kie task submission transient error ({attempt}/{submit_attempts}); retrying in {delay:.1f}s: {message}", flush=True)
             time.sleep(delay)
             continue
-        raise RuntimeError(message or "Kie task submission failed")
+        raise_for_kie_code(data, f"submit {model}")
     task_id = data.get("data", {}).get("taskId")
     if not task_id:
         raise RuntimeError("Kie response did not include taskId")
@@ -619,12 +801,13 @@ def veo_input_payload(model: str, prompt: str, image_urls: str | list[str] | tup
     images = normalize_media_urls(image_urls)
     if len(images) > 3:
         raise ValueError("Veo3.1 supports 0 images for text-to-video, 1-2 images for first/last frames, or 3 reference images; more than 3 images are not supported.")
+    if len(images) == 3 and model == "veo3.1-quality":
+        raise ValueError("Veo3.1 Quality does not support reference-image mode; choose Veo3.1 Lite or Fast for 3 reference images.")
     payload: dict[str, Any] = {
         "prompt": prompt,
         "model": VEO_MODEL_MAP[model],
         "aspect_ratio": aspect_ratio,
         "enableTranslation": True,
-        "resolution": resolution,
     }
     if not images:
         payload["generationType"] = "TEXT_2_VIDEO"
@@ -639,31 +822,38 @@ def veo_input_payload(model: str, prompt: str, image_urls: str | list[str] | tup
 
 def submit_veo(api_key: str, model: str, prompt: str, image_urls: str | list[str] | tuple[str, ...], aspect_ratio: str, resolution: str) -> tuple[str, dict[str, Any]]:
     payload = veo_input_payload(model, prompt, image_urls, aspect_ratio, resolution)
-    submit_attempts = 8
+    submit_attempts = 4
     data: dict[str, Any] = {}
     for attempt in range(1, submit_attempts + 1):
-        with _KIE_SUBMIT_LOCK:
-            response = request_with_retry(
-                "POST",
-                f"{KIE_API_HOST}/api/v1/veo/generate",
-                headers=get_headers(api_key),
-                json=payload,
-                timeout=60,
-                attempts=8,
-                base_delay=2,
-            )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code") == 200:
+        response = request_with_retry(
+            "POST",
+            f"{KIE_API_HOST}/api/v1/veo/generate",
+            headers=get_headers(api_key),
+            json=payload,
+            timeout=60,
+            attempts=4,
+            base_delay=2,
+        )
+        raise_for_kie_status(response, f"submit {model}")
+        data = response_json(response, f"submit {model}")
+        if data.get("code") in {200, "200"}:
             break
         message = str(data.get("msg") or data.get("message") or "")
-        transient = any(token in message.lower() for token in ["frequency", "too high", "retry later", "rate limit"])
+        code = data.get("code")
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            status = None
+        transient = status in TRANSIENT_HTTP_STATUSES or any(
+            token in message.lower()
+            for token in ["frequency", "too high", "retry later", "rate limit", "overloaded"]
+        )
         if transient and attempt < submit_attempts:
-            delay = min(60, 5 * attempt)
-            print(f"Kie Veo submission transient error ({attempt}/{submit_attempts}); retrying in {delay}s: {message}", flush=True)
+            delay = min(30.0, 3 * attempt) + random.uniform(0, 0.5)
+            print(f"Kie Veo submission transient error ({attempt}/{submit_attempts}); retrying in {delay:.1f}s: {message}", flush=True)
             time.sleep(delay)
             continue
-        raise RuntimeError(message or "Kie Veo submission failed")
+        raise_for_kie_code(data, f"submit {model}")
     task_id = data.get("data", {}).get("taskId")
     if not task_id:
         raise RuntimeError("Kie Veo response did not include taskId")
@@ -745,7 +935,7 @@ def kie_result_url(data: dict[str, Any], kind: str) -> str:
     return first_url(fallback, kind)
 
 
-def query_job(api_key: str, task_id: str) -> tuple[str, str, str, dict[str, Any]]:
+def query_job(api_key: str, task_id: str, kind: str = "image") -> tuple[str, str, str, dict[str, Any]]:
     response = request_with_retry(
         "GET",
         f"{KIE_API_HOST}/api/v1/jobs/recordInfo",
@@ -755,15 +945,14 @@ def query_job(api_key: str, task_id: str) -> tuple[str, str, str, dict[str, Any]
         attempts=5,
         base_delay=1,
     )
-    response.raise_for_status()
-    raw = response.json()
-    if raw.get("code") != 200:
-        raise RuntimeError(raw.get("msg") or "Kie query failed")
+    raise_for_kie_status(response, "query task")
+    raw = response_json(response, "query task")
+    raise_for_kie_code(raw, "query task")
     data = raw.get("data", {})
     success_flag = data.get("successFlag")
-    if success_flag == 1:
+    if str(success_flag) == "1":
         state = "success"
-    elif success_flag in {2, 3}:
+    elif str(success_flag) in {"2", "3"}:
         state = "fail"
     else:
         state = str(data.get("state") or data.get("status") or "waiting").lower()
@@ -772,7 +961,7 @@ def query_job(api_key: str, task_id: str) -> tuple[str, str, str, dict[str, Any]
     if state in {"failed", "error", "canceled", "cancelled"}:
         state = "fail"
     error = data.get("failMsg") or data.get("errorMessage") or data.get("message") or ""
-    return state, kie_result_url(data, "image"), error, raw
+    return state, kie_result_url(data, kind), error, raw
 
 
 def query_veo(api_key: str, task_id: str) -> tuple[str, str, str, dict[str, Any]]:
@@ -785,20 +974,46 @@ def query_veo(api_key: str, task_id: str) -> tuple[str, str, str, dict[str, Any]
         attempts=5,
         base_delay=1,
     )
-    response.raise_for_status()
-    raw = response.json()
-    if raw.get("code") != 200:
-        raise RuntimeError(raw.get("msg") or "Kie Veo query failed")
+    raise_for_kie_status(response, "query Veo task")
+    raw = response_json(response, "query Veo task")
+    raise_for_kie_code(raw, "query Veo task")
     data = raw.get("data", {})
     flag = data.get("successFlag")
-    if flag == 1:
+    if str(flag) == "1":
         state = "success"
-    elif flag in {2, 3}:
+    elif str(flag) in {"2", "3"}:
         state = "fail"
     else:
-        state = "waiting"
+        state = str(data.get("state") or data.get("status") or "waiting").lower()
+    if state in {"succeeded", "completed", "done"}:
+        state = "success"
+    if state in {"failed", "error", "canceled", "cancelled"}:
+        state = "fail"
     error = data.get("errorMessage") or ""
     return state, kie_result_url(data, "video"), error, raw
+
+
+def task_failure_category(raw: dict[str, Any], message: str) -> str:
+    data = raw.get("data") or {}
+    raw_code = data.get("failCode") or data.get("errorCode")
+    try:
+        status = int(raw_code)
+    except (TypeError, ValueError):
+        status = None
+    if status is not None:
+        category = kie_error_category(status)
+        if category != "request":
+            return category
+    lowered = message.lower()
+    if any(token in lowered for token in ("credit", "quota", "balance", "余额", "额度")):
+        return "quota"
+    if any(token in lowered for token in ("content policy", "safety", "nsfw", "moderation", "敏感", "审核")):
+        return "content_policy"
+    if any(token in lowered for token in ("download image", "fetch image", "image url", "reference image", "素材")):
+        return "input_media"
+    if any(token in lowered for token in ("rate limit", "frequency", "too many", "限流", "频率")):
+        return "rate_limit"
+    return "task_failed"
 
 
 def wait_for_result(api_key: str, task_id: str, query_type: str, kind: str, timeout: int, poll: int, max_query_errors: int) -> tuple[str, str, dict[str, Any]]:
@@ -806,21 +1021,22 @@ def wait_for_result(api_key: str, task_id: str, query_type: str, kind: str, time
     last_raw: dict[str, Any] = {}
     query_errors = 0
     while time.time() <= deadline:
-        time.sleep(poll)
         try:
             if query_type == "veo":
                 state, url, error, raw = query_veo(api_key, task_id)
             else:
-                state, url, error, raw = query_job(api_key, task_id)
-                if kind == "video":
-                    url = first_url(raw.get("data", {}), "video")
-        except requests.RequestException as exc:
+                state, url, error, raw = query_job(api_key, task_id, kind)
+        except KieAPIError as exc:
+            if exc.category not in {"network", "rate_limit", "maintenance", "provider", "invalid_response"}:
+                raise
             query_errors += 1
             print(f"{task_id}: query error {query_errors}/{max_query_errors}: {exc}", flush=True)
             if query_errors >= max_query_errors:
-                raise RuntimeError(
+                raise KieAPIError(
+                    "network",
                     f"Kie query failed {query_errors} times in a row for task {task_id}. "
-                    "Stopping early so the batch can be rerun after network recovery."
+                    "The saved task will be resumed after network recovery.",
+                    resumable=True,
                 ) from exc
             continue
         query_errors = 0
@@ -829,8 +1045,70 @@ def wait_for_result(api_key: str, task_id: str, query_type: str, kind: str, time
         if state == "success" and url:
             return state, url, raw
         if state == "fail":
-            raise RuntimeError(error or f"Kie task failed: {task_id}")
+            message = error or f"Kie task failed: {task_id}"
+            raise KieAPIError(task_failure_category(raw, message), message, resumable=False)
+        time.sleep(max(1, poll))
     return "timeout", "", last_raw
+
+
+def veo_response_resolution(raw: dict[str, Any]) -> str:
+    data = raw.get("data") or {}
+    response = data.get("response") or {}
+    if isinstance(response, dict) and response.get("resolution"):
+        return str(response["resolution"]).lower()
+    return ""
+
+
+def ensure_veo_resolution(
+    api_key: str,
+    task_id: str,
+    requested: str,
+    initial_url: str,
+    initial_raw: dict[str, Any],
+    timeout: int,
+    poll: int,
+) -> tuple[str, dict[str, Any]]:
+    requested = requested.lower()
+    if requested == "720p" or veo_response_resolution(initial_raw) == requested:
+        return initial_url, {"source": "initial_result", "resolution": veo_response_resolution(initial_raw) or requested}
+    if requested != "1080p":
+        raise ValueError("Veo3.1 supports 720p initial output or the separate 1080p retrieval flow; 480p is not supported.")
+    deadline = time.time() + timeout
+    last_data: dict[str, Any] = {}
+    while time.time() <= deadline:
+        response = request_with_retry(
+            "GET",
+            f"{KIE_API_HOST}/api/v1/veo/get-1080p-video",
+            headers=get_headers(api_key),
+            params={"taskId": task_id, "index": 0},
+            timeout=30,
+            attempts=2,
+            base_delay=2,
+        )
+        if response.status_code in {400, 404, 409, 422, 425, 429, 500, 502, 503, 504}:
+            last_data = {"http_status": response.status_code, "message": response_message(response)}
+        else:
+            raise_for_kie_status(response, "get Veo 1080p result")
+            data = response_json(response, "get Veo 1080p result")
+            last_data = data
+            if data.get("code") in {200, "200"}:
+                result_url = str((data.get("data") or {}).get("resultUrl") or "")
+                if result_url:
+                    return result_url, data
+            else:
+                raw_code = data.get("code")
+                try:
+                    status = int(raw_code)
+                except (TypeError, ValueError):
+                    status = None
+                if status not in {400, 404, 409, 422, 425, 429, 500, 502, 503, 504}:
+                    raise_for_kie_code(data, "get Veo 1080p result")
+        time.sleep(max(5, poll))
+    raise KieAPIError(
+        "resolution_pending",
+        f"Veo 1080p result is not ready yet for task {task_id}; resume the saved task later. Last response: {last_data}",
+        resumable=True,
+    )
 
 
 def is_video_file(path: Path) -> bool:
@@ -838,7 +1116,12 @@ def is_video_file(path: Path) -> bool:
         header = path.read_bytes()[:32]
     except Exception:
         return False
-    return (len(header) >= 12 and header[4:8] == b"ftyp") or header.startswith(b"\x1aE\xdf\xa3")
+    iso_video = (
+        len(header) >= 12
+        and header[4:8] == b"ftyp"
+        and header[8:12] not in {b"avif", b"avis", b"heic", b"heif", b"mif1", b"msf1"}
+    )
+    return iso_video or header.startswith(b"\x1aE\xdf\xa3")
 
 
 def is_image_file(path: Path) -> bool:
@@ -850,6 +1133,8 @@ def is_image_file(path: Path) -> bool:
         header.startswith(b"\x89PNG\r\n\x1a\n")
         or header.startswith(b"\xff\xd8\xff")
         or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+        or header.startswith((b"GIF87a", b"GIF89a", b"BM"))
+        or (len(header) >= 12 and header[4:12] in {b"ftypavif", b"ftypavis"})
     )
 
 
@@ -859,36 +1144,46 @@ def validate_downloaded_file(path: Path, kind: str, url: str) -> None:
             path.unlink(missing_ok=True)
         except Exception:
             pass
-        raise RuntimeError(f"Downloaded result is not a valid video file: {url}")
-    if kind == "image" and is_video_file(path):
+        raise KieAPIError("invalid_result", f"Downloaded result is not a valid video file: {url}")
+    if kind == "image" and not is_image_file(path):
         try:
             path.unlink(missing_ok=True)
         except Exception:
             pass
-        raise RuntimeError(f"Downloaded result is a video, not an image: {url}")
+        raise KieAPIError("invalid_result", f"Downloaded result is not a valid image file: {url}")
 
 
 def download_file(url: str, path: Path, kind: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    last_error: Exception | None = None
     for attempt in range(1, 6):
-        with request_with_retry("GET", url, stream=True, timeout=180, verify=False) as response:
-            response.raise_for_status()
-            with path.open("wb") as file_obj:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        file_obj.write(chunk)
-        if path.exists() and path.stat().st_size > 0:
-            validate_downloaded_file(path, kind, url)
-            return
+        temporary = path.with_name(f"{path.name}.part-{uuid.uuid4().hex}")
         try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            with request_with_retry("GET", url, stream=True, timeout=180, attempts=3) as response:
+                raise_for_kie_status(response, "download result")
+                with temporary.open("wb") as file_obj:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            file_obj.write(chunk)
+            if temporary.exists() and temporary.stat().st_size > 0:
+                validate_downloaded_file(temporary, kind, url)
+                os.replace(temporary, path)
+                return
+            last_error = KieAPIError("invalid_result", f"Downloaded an empty result file: {url}")
+        except KieAPIError as exc:
+            last_error = exc
+            if exc.category != "invalid_result" or attempt == 5:
+                raise
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         if attempt < 5:
             delay = min(20, 2 ** attempt)
-            print(f"Downloaded empty file ({attempt}/5); retrying in {delay}s", flush=True)
+            print(f"Invalid or empty download ({attempt}/5); retrying in {delay}s", flush=True)
             time.sleep(delay)
-    raise RuntimeError(f"Downloaded empty file after retries: {path}")
+    raise last_error or KieAPIError("invalid_result", f"Downloaded empty file after retries: {path}")
 
 
 def render_prompt(template: str, pid: str) -> str:
@@ -976,13 +1271,29 @@ def resolve_video_duration(requested: int, model: str) -> int:
     return requested
 
 
-def image_input_payload(model: str, prompt: str, image_url: str, aspect_ratio: str, resolution: str) -> dict[str, Any]:
+def image_input_payload(
+    model: str,
+    prompt: str,
+    image_url: str | list[str] | tuple[str, ...] | None,
+    aspect_ratio: str,
+    resolution: str,
+) -> dict[str, Any]:
     aspect_ratio = resolve_aspect_ratio(aspect_ratio)
     resolution = resolve_image_resolution(resolution)
     field = IMAGE_MODEL_PAYLOADS[model]
+    image_urls = normalize_media_urls(image_url)
+    if model == "nano-banana-2-lite" and len(image_urls) > 10:
+        raise ValueError("Nano Banana 2 Lite supports at most 10 reference images.")
     payload: dict[str, Any] = {"prompt": prompt}
     if field:
-        payload[field] = [image_url]
+        if image_urls:
+            payload[field] = image_urls
+        elif model in {
+            "gpt-image-2-image-to-image",
+            "google/nano-banana-edit",
+            "seedream/5-lite-image-to-image",
+        }:
+            raise ValueError(f"{model} requires at least one reference image.")
     if model in {"gpt-image-2-text-to-image", "gpt-image-2-image-to-image"}:
         payload["aspect_ratio"] = aspect_ratio
     elif model in {"google/nano-banana", "google/nano-banana-edit"}:
@@ -999,6 +1310,7 @@ def image_input_payload(model: str, prompt: str, image_url: str, aspect_ratio: s
     elif model in {"seedream/5-lite-text-to-image", "seedream/5-lite-image-to-image"}:
         payload["aspect_ratio"] = aspect_ratio
         payload["quality"] = "high" if resolution == "4K" else "basic"
+        payload["output_format"] = "png"
         payload["nsfw_checker"] = False
     else:
         payload["aspect_ratio"] = aspect_ratio
@@ -1016,13 +1328,37 @@ def video_input_payload(
     duration: int,
     video_urls: list[str] | tuple[str, ...] | None = None,
     audio_urls: list[str] | tuple[str, ...] | None = None,
+    audio_ids: list[str] | tuple[str, ...] | None = None,
+    character_ids: list[str] | tuple[str, ...] | None = None,
+    source_task_id: str = "",
+    extend_at: int = 2,
+    extend_times: int = 1,
 ) -> dict[str, Any]:
     aspect_ratio = resolve_aspect_ratio(aspect_ratio)
     image_urls = normalize_media_urls(image_url)
     video_refs = normalize_media_urls(video_urls)
     audio_refs = normalize_media_urls(audio_urls)
+    omni_audio_ids = normalize_media_urls(audio_ids)
+    omni_character_ids = normalize_media_urls(character_ids)
+    if model == "grok-imagine/upscale":
+        if image_urls or video_refs or audio_refs or omni_audio_ids or omni_character_ids:
+            raise ValueError("Grok Imagine Video Upscale accepts a Kie task ID only; external media is not supported.")
+        if not source_task_id:
+            raise ValueError("Grok Imagine Video Upscale requires --source-task-id from a previous Kie Grok video task.")
+        return {"task_id": source_task_id}
+    if model == "grok-imagine/extend":
+        if image_urls or video_refs or audio_refs or omni_audio_ids or omni_character_ids:
+            raise ValueError("Grok Imagine Video Extend accepts a Kie task ID only; external media is not supported.")
+        if not source_task_id:
+            raise ValueError("Grok Imagine Video Extend requires --source-task-id from a previous Kie Grok video task.")
+        return {
+            "task_id": source_task_id,
+            "prompt": prompt,
+            "extend_at": extend_at,
+            "extend_times": str(extend_times),
+        }
     if model == "grok-imagine/text-to-video":
-        if image_urls or video_refs or audio_refs:
+        if image_urls or video_refs or audio_refs or omni_audio_ids or omni_character_ids:
             raise ValueError("Grok Imagine text-to-video supports 0 images and no video/audio references.")
         return {
             "prompt": prompt,
@@ -1033,7 +1369,7 @@ def video_input_payload(
             "nsfw_checker": False,
         }
     if model == "grok-imagine/image-to-video":
-        if len(image_urls) != 1 or video_refs or audio_refs:
+        if len(image_urls) != 1 or video_refs or audio_refs or omni_audio_ids or omni_character_ids:
             raise ValueError("Grok Imagine image-to-video supports exactly 1 image and no video/audio references.")
         return {
             "prompt": prompt,
@@ -1045,7 +1381,7 @@ def video_input_payload(
             "nsfw_checker": False,
         }
     if model == "grok-imagine-video-1-5-preview":
-        if len(image_urls) > 1 or video_refs or audio_refs:
+        if len(image_urls) > 1 or video_refs or audio_refs or omni_audio_ids or omni_character_ids:
             raise ValueError("Grok Imagine Video 1.5 Preview supports 0-1 images and no video/audio references.")
         payload = {
             "prompt": prompt,
@@ -1057,14 +1393,31 @@ def video_input_payload(
             payload["image_urls"] = image_urls
         return payload
     if model == "gemini-omni-video":
+        if audio_refs:
+            raise ValueError("Gemini Omni Video accepts Kie audio IDs, not external audio files; use --audio-id.")
+        if len(video_refs) > 1:
+            raise ValueError("Gemini Omni Video supports at most one video reference.")
+        if len(omni_character_ids) > 3:
+            raise ValueError("Gemini Omni Video supports at most 3 character IDs.")
+        quota = len(image_urls) + (2 * len(video_refs)) + len(omni_character_ids)
+        if quota > 7:
+            raise ValueError("Gemini Omni Video reference quota exceeded: images + 2*videos + character IDs must be at most 7.")
         payload = {
             "prompt": prompt,
             "duration": str(duration),
         }
         if image_urls:
             payload["image_urls"] = image_urls
+        if video_refs:
+            payload["video_list"] = [{"url": video_refs[0], "start": 0, "ends": 10}]
+        if omni_audio_ids:
+            payload["audio_ids"] = omni_audio_ids
+        if omni_character_ids:
+            payload["character_ids"] = omni_character_ids
         return payload
     if model in {"bytedance/seedance-2", "bytedance/seedance-2-fast", "bytedance/seedance-2-mini"}:
+        if omni_audio_ids or omni_character_ids:
+            raise ValueError("Seedance 2.0 accepts media references, not Gemini Omni audio/character IDs.")
         if len(image_urls) > 9:
             raise ValueError("Seedance 2.0 supports at most 9 image references.")
         payload = {
@@ -1092,6 +1445,116 @@ def video_input_payload(
     raise ValueError(f"Unsupported video model payload: {model}")
 
 
+def utc_timestamp() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def stable_hash(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_text_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(value, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def write_json_atomic(path: Path, value: Any) -> None:
+    write_text_atomic(path, json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def result_file_valid(path: Path, kind: str) -> bool:
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    return is_image_file(path) if kind == "image" else is_video_file(path)
+
+
+def exception_category(exc: Exception) -> str:
+    if isinstance(exc, KieAPIError):
+        return exc.category
+    if isinstance(exc, (ValueError, FileNotFoundError)):
+        return "validation"
+    return "runtime"
+
+
+def failed_record(pid: str, source_path: Path, exc: Exception, *, folder: str = "") -> dict[str, Any]:
+    return {
+        "pid": pid,
+        "folder": folder,
+        "source_path": str(source_path),
+        "state": "error",
+        "error_category": exception_category(exc),
+        "error": str(exc),
+        "updated_at": utc_timestamp(),
+    }
+
+
+def record_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
+    failures = [
+        {
+            "pid": str(record.get("pid") or "unknown"),
+            "category": str(record.get("error_category") or record.get("state") or "unknown"),
+            "message": str(record.get("error") or "No usable output was returned."),
+        }
+        for record in records
+        if record.get("state") != "success"
+    ]
+    return {
+        "total": len(records),
+        "success": len(records) - len(failures),
+        "failed": len(failures),
+        "failures": failures,
+    }
+
+
+def batch_exit_code(stats: dict[str, Any]) -> int:
+    failed = int(stats.get("failed") or 0)
+    success = int(stats.get("success") or 0)
+    if not failed:
+        return 0
+    return 2 if success else 1
+
+
+def next_actions(stage: str) -> list[dict[str, str]]:
+    if stage == "images":
+        return [
+            {"id": "1", "action": "继续生成视频"},
+            {"id": "2", "action": "只重试失败项"},
+            {"id": "3", "action": "处理新的文件夹"},
+            {"id": "4", "action": "结束"},
+        ]
+    if stage == "videos":
+        return [
+            {"id": "1", "action": "只重试失败项"},
+            {"id": "2", "action": "处理新的文件夹"},
+            {"id": "3", "action": "结束"},
+        ]
+    return [
+        {"id": "1", "action": "重试或继续当前任务（已提交任务只查询，不重复提交）"},
+        {"id": "2", "action": "继续新的单处理"},
+        {"id": "3", "action": "切换到批处理"},
+        {"id": "4", "action": "结束"},
+    ]
+
+
 def process_single_product(args: argparse.Namespace, folder: ProductFolder, output_dir: Path, text_dir: Path, product: ProductImage, image_model_label: str, image_model: str, aspect_ratio: str) -> dict[str, Any]:
     print(f"Processing folder {folder.name}: {product.pid}", flush=True)
     output_path = output_dir / f"{product.pid}.png"
@@ -1101,60 +1564,170 @@ def process_single_product(args: argparse.Namespace, folder: ProductFolder, outp
         for stale_path in (output_path, reverse_path, json_path):
             try:
                 stale_path.unlink(missing_ok=True)
-            except Exception as exc:
+            except OSError as exc:
                 print(f"Could not remove stale output for forced image rerun: {stale_path}: {exc}", flush=True)
-    if not args.force and output_path.exists() and reverse_path.exists() and json_path.exists():
-        print(f"Skipping existing processed image: {product.pid}", flush=True)
-        return json.loads(json_path.read_text(encoding="utf-8"))
-    source_url = upload_file(args.api_key, product.path)
-    if not args.force and reverse_path.exists() and reverse_path.stat().st_size > 0:
-        reverse_prompt = reverse_path.read_text(encoding="utf-8").strip()
-        reverse_raw = {"reused_reverse_path": str(reverse_path)}
-    else:
-        reverse_prompt, reverse_raw = reverse_prompt_with_kie(args, product.pid, source_url, args.image_reverse_meta_prompt)
-        text_dir.mkdir(parents=True, exist_ok=True)
-        reverse_path.write_text(reverse_prompt, encoding="utf-8")
-    prompt = build_kie_image_prompt(reverse_prompt, product.pid, args.prompt)
-    actual_image_model = resolve_image_generation_model(image_model, bool(source_url))
-    task_id, submit_raw = submit_job(
-        args.api_key,
-        actual_image_model,
-        image_input_payload(actual_image_model, prompt, source_url, aspect_ratio, args.image_resolution),
+
+    source_digest = file_sha256(product.path)
+    reverse_signature = stable_hash(
+        {
+            "version": 2,
+            "source_sha256": source_digest,
+            "model": normalize_reverse_model(args.reverse_model),
+            "api": args.reverse_api,
+            "reasoning": args.reverse_reasoning_effort,
+            "meta_prompt": args.image_reverse_meta_prompt,
+        }
     )
-    state, result_url, final_raw = wait_for_result(args.api_key, task_id, "jobs", "image", args.timeout, args.poll, args.max_query_errors)
-    if result_url == source_url:
-        raise RuntimeError("Kie result URL matched the original source URL; refusing to save an unchanged source image.")
-    if result_url:
-        download_file(result_url, output_path, "image")
-    record = {
-        "pid": product.pid,
-        "folder": folder.name,
-        "source_path": str(product.path),
-        "source_url": source_url,
-        "reverse_provider": "kie",
-        "reverse_source_path": str(product.path),
-        "reverse_source_url": source_url,
-        "processed_path": str(output_path) if result_url else "",
-        "reverse_model": args.reverse_model,
-        "image_reverse_meta_prompt": args.image_reverse_meta_prompt,
-        "reverse_prompt": reverse_prompt,
-        "kie_image_prompt": prompt,
-        "image_model_choice": args.image_model,
-        "image_model_label": image_model_label,
-        "image_model": image_model,
-        "actual_image_model": actual_image_model,
-        "aspect_ratio": aspect_ratio,
-        "task_id": task_id,
-        "state": state,
-        "result_url": result_url,
-        "reverse_raw": reverse_raw,
-        "submit": submit_raw,
-        "final": final_raw,
-    }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    text_dir.mkdir(parents=True, exist_ok=True)
-    reverse_path.write_text(reverse_prompt, encoding="utf-8")
-    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    existing = load_json(json_path)
+    reverse_prompt = ""
+    reverse_raw: dict[str, Any] = {}
+    source_url = ""
+    if (
+        not args.force
+        and existing.get("reverse_signature") == reverse_signature
+        and reverse_path.is_file()
+    ):
+        reverse_prompt = reverse_path.read_text(encoding="utf-8-sig").strip()
+        reverse_raw = existing.get("reverse_raw") or {"reused_reverse_path": str(reverse_path)}
+    if not reverse_prompt:
+        source_url = upload_file(args.api_key, product.path)
+        reverse_prompt, reverse_raw = reverse_prompt_with_kie(
+            args,
+            product.pid,
+            source_url,
+            args.image_reverse_meta_prompt,
+        )
+        write_text_atomic(reverse_path, reverse_prompt)
+
+    prompt = build_kie_image_prompt(reverse_prompt, product.pid, args.prompt)
+    actual_image_model = resolve_image_generation_model(image_model, True)
+    generation_signature = stable_hash(
+        {
+            "version": 2,
+            "reverse_signature": reverse_signature,
+            "reverse_prompt": reverse_prompt,
+            "model": actual_image_model,
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolve_image_resolution(args.image_resolution),
+        }
+    )
+    if (
+        not args.force
+        and existing.get("generation_signature") == generation_signature
+        and existing.get("state") == "success"
+        and result_file_valid(output_path, "image")
+    ):
+        existing["cached"] = True
+        print(f"Using verified cached image: {product.pid}", flush=True)
+        return existing
+
+    task_id = ""
+    query_type = "jobs"
+    record = dict(existing) if existing.get("generation_signature") == generation_signature else {}
+    if (
+        not args.force
+        and record.get("task_id")
+        and str(record.get("state", "")).lower() in RESUMABLE_STATES
+    ):
+        task_id = str(record["task_id"])
+        query_type = str(record.get("query_type") or "jobs")
+        source_url = str(record.get("source_url") or source_url)
+        print(f"Resuming saved image task {task_id} for {product.pid}", flush=True)
+    else:
+        if not source_url:
+            source_url = upload_file(args.api_key, product.path)
+        task_id, submit_raw = submit_job(
+            args.api_key,
+            actual_image_model,
+            image_input_payload(actual_image_model, prompt, source_url, aspect_ratio, args.image_resolution),
+        )
+        record = {
+            "pid": product.pid,
+            "folder": folder.name,
+            "source_path": str(product.path),
+            "source_sha256": source_digest,
+            "source_url": source_url,
+            "reverse_provider": "kie",
+            "reverse_source_path": str(product.path),
+            "reverse_source_url": source_url,
+            "processed_path": "",
+            "expected_output_path": str(output_path),
+            "requested_reverse_model": normalize_reverse_model(args.reverse_model),
+            "reverse_model": (reverse_raw.get("_h_meta") or {}).get("actual_model", normalize_reverse_model(args.reverse_model)),
+            "image_reverse_meta_prompt": args.image_reverse_meta_prompt,
+            "reverse_prompt": reverse_prompt,
+            "kie_image_prompt": prompt,
+            "image_model_choice": args.image_model,
+            "image_model_label": image_model_label,
+            "image_model": image_model,
+            "actual_image_model": actual_image_model,
+            "aspect_ratio": aspect_ratio,
+            "image_resolution": resolve_image_resolution(args.image_resolution),
+            "reverse_signature": reverse_signature,
+            "generation_signature": generation_signature,
+            "task_id": task_id,
+            "query_type": query_type,
+            "state": "submitted",
+            "result_url": "",
+            "reverse_raw": reverse_raw,
+            "submit": submit_raw,
+            "created_at": utc_timestamp(),
+            "updated_at": utc_timestamp(),
+        }
+        write_json_atomic(json_path, record)
+
+    try:
+        state, result_url, final_raw = wait_for_result(
+            args.api_key,
+            task_id,
+            query_type,
+            "image",
+            args.timeout,
+            args.poll,
+            args.max_query_errors,
+        )
+        if result_url and source_url and result_url == source_url:
+            raise KieAPIError(
+                "invalid_result",
+                "Kie returned the uploaded source URL instead of a generated image.",
+                resumable=False,
+            )
+        if result_url:
+            download_file(result_url, output_path, "image")
+        resolved_state = "success" if result_url and result_file_valid(output_path, "image") else state
+        if resolved_state == "success" and not result_url:
+            resolved_state = "error"
+        record.update(
+            {
+                "state": resolved_state,
+                "processed_path": str(output_path) if result_url else "",
+                "result_url": result_url,
+                "final": final_raw,
+                "updated_at": utc_timestamp(),
+            }
+        )
+        if record["state"] == "timeout":
+            record["error_category"] = "timeout"
+            record["error"] = "Task is still saved and will resume on the next run."
+        elif record["state"] == "error" and not result_url:
+            record["error_category"] = "invalid_result"
+            record["error"] = "Kie reported success but returned no generated image URL."
+    except Exception as exc:
+        resumable = isinstance(exc, KieAPIError) and (
+            exc.resumable
+            if exc.resumable is not None
+            else exc.category in {"network", "rate_limit", "maintenance", "provider", "invalid_response", "invalid_result"}
+        )
+        record.update(
+            {
+                "state": "waiting" if resumable else "error",
+                "error_category": exception_category(exc),
+                "error": str(exc),
+                "updated_at": utc_timestamp(),
+            }
+        )
+    write_json_atomic(json_path, record)
     return record
 
 
@@ -1174,24 +1747,18 @@ def process_product_folder(args: argparse.Namespace, folder: ProductFolder, outp
                 manifest.append(future.result())
             except Exception as exc:
                 print(f"Product failed; continuing: {product.pid}: {exc}", flush=True)
-                manifest.append(
-                    {
-                        "pid": product.pid,
-                        "folder": folder.name,
-                        "source_path": str(product.path),
-                        "state": "error",
-                        "error": str(exc),
-                    }
-                )
+                manifest.append(failed_record(product.pid, product.path, exc, folder=folder.name))
     manifest.sort(key=lambda item: item.get("pid", ""))
     manifest_path = text_dir / "processed_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(manifest_path, manifest)
+    stats = record_stats(manifest)
     return {
         "folder": folder.name,
         "source_dir": str(folder.path),
         "processed_dir": str(output_dir),
         "manifest": str(manifest_path),
         "count": len(manifest),
+        **stats,
         "workers": workers,
     }
 
@@ -1221,13 +1788,7 @@ def process_product_folders_concurrently(args: argparse.Namespace, folders: list
                 record = future.result()
             except Exception as exc:
                 print(f"Product failed; continuing: {folder.name}/{product.pid}: {exc}", flush=True)
-                record = {
-                    "pid": product.pid,
-                    "folder": folder.name,
-                    "source_path": str(product.path),
-                    "state": "error",
-                    "error": str(exc),
-                }
+                record = failed_record(product.pid, product.path, exc, folder=folder.name)
             manifests[str(folder.path)].append(record)
 
     summaries: list[dict[str, Any]] = []
@@ -1235,7 +1796,8 @@ def process_product_folders_concurrently(args: argparse.Namespace, folders: list
         folder, output_dir, text_dir = folder_outputs[key]
         manifest = sorted(manifests[key], key=lambda item: item.get("pid", ""))
         manifest_path = text_dir / "processed_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_atomic(manifest_path, manifest)
+        stats = record_stats(manifest)
         summaries.append(
             {
                 "folder": folder.name,
@@ -1245,6 +1807,7 @@ def process_product_folders_concurrently(args: argparse.Namespace, folders: list
                 "processed_dir": str(output_dir),
                 "manifest": str(manifest_path),
                 "count": len(manifest),
+                **stats,
                 "workers": workers,
             }
         )
@@ -1263,14 +1826,35 @@ def process_images(args: argparse.Namespace) -> int:
     summaries = process_product_folders_concurrently(args, folders, input_dir, multi_folder, image_model_label, image_model, aspect_ratio)
     root = output_root(args, input_dir)
     summary_path = root / "文本" / "h_processed_batch_manifest.json"
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"output_root": str(root), "text_dir": str(root / "文本"), "image_dir": str(root / "图像"), "video_dir": str(root / "视频"), "batch_manifest": str(summary_path), "folders": summaries}, ensure_ascii=False, indent=2))
-    return 0
+    aggregate = {
+        "total": sum(int(item["total"]) for item in summaries),
+        "success": sum(int(item["success"]) for item in summaries),
+        "failed": sum(int(item["failed"]) for item in summaries),
+        "failures": [failure for item in summaries for failure in item["failures"]],
+    }
+    result = {
+        "mode": "批处理",
+        "stage": "图片",
+        "output_root": str(root),
+        "text_dir": str(root / "文本"),
+        "image_dir": str(root / "图像"),
+        "video_dir": str(root / "视频"),
+        "batch_manifest": str(summary_path),
+        "stats": aggregate,
+        "folders": summaries,
+        "next_actions": next_actions("images"),
+    }
+    write_json_atomic(summary_path, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return batch_exit_code(aggregate)
 
 
 def submit_video(args: argparse.Namespace, pid: str, processed_image: Path, output_dir: Path, text_dir: Path) -> dict[str, Any]:
     video_model_label, video_model = resolve_video_model(args.video_model)
+    if video_model in VIDEO_TRANSFORM_MODELS:
+        raise ValueError(f"{video_model_label} is available in single mode only because it requires an existing Kie task ID.")
+    if video_model in VEO_MODEL_MAP and args.video_resolution == "480p":
+        raise ValueError("Veo3.1 does not provide a 480p output option; choose 720p or 1080p.")
     aspect_ratio = resolve_aspect_ratio(args.aspect_ratio)
     output_path = output_dir / f"{pid}.mp4"
     reverse_path = text_dir / f"{pid}.video_reverse.txt"
@@ -1279,63 +1863,190 @@ def submit_video(args: argparse.Namespace, pid: str, processed_image: Path, outp
         for stale_path in (output_path, reverse_path, json_path):
             try:
                 stale_path.unlink(missing_ok=True)
-            except Exception as exc:
+            except OSError as exc:
                 print(f"Could not remove stale output for forced video rerun: {stale_path}: {exc}", flush=True)
-    if not args.force and output_path.exists() and reverse_path.exists() and json_path.exists():
-        print(f"Skipping existing video: {pid}", flush=True)
-        return json.loads(json_path.read_text(encoding="utf-8"))
-    image_url = upload_file(args.api_key, processed_image)
-    if not args.force and reverse_path.exists() and reverse_path.stat().st_size > 0:
-        reverse_prompt = reverse_path.read_text(encoding="utf-8").strip()
-        reverse_raw = {"reused_reverse_path": str(reverse_path)}
-    else:
+
+    source_digest = file_sha256(processed_image)
+    reverse_signature = stable_hash(
+        {
+            "version": 2,
+            "source_sha256": source_digest,
+            "model": normalize_reverse_model(args.reverse_model),
+            "api": args.reverse_api,
+            "reasoning": args.reverse_reasoning_effort,
+            "meta_prompt": args.video_reverse_meta_prompt,
+        }
+    )
+    existing = load_json(json_path)
+    reverse_prompt = ""
+    reverse_raw: dict[str, Any] = {}
+    image_url = ""
+    if (
+        not args.force
+        and existing.get("reverse_signature") == reverse_signature
+        and reverse_path.is_file()
+    ):
+        reverse_prompt = reverse_path.read_text(encoding="utf-8-sig").strip()
+        reverse_raw = existing.get("video_reverse_raw") or {"reused_reverse_path": str(reverse_path)}
+    if not reverse_prompt:
+        image_url = upload_file(args.api_key, processed_image)
         reverse_prompt, reverse_raw = reverse_prompt_with_kie(args, pid, image_url, args.video_reverse_meta_prompt)
-        text_dir.mkdir(parents=True, exist_ok=True)
-        reverse_path.write_text(reverse_prompt, encoding="utf-8")
+        write_text_atomic(reverse_path, reverse_prompt)
+
     prompt = build_kie_video_prompt(reverse_prompt, pid, args.prompt)
-    actual_video_model = resolve_video_generation_model(video_model, bool(image_url))
+    actual_video_model = resolve_video_generation_model(video_model, True)
     duration = resolve_video_duration(args.duration, actual_video_model)
-    if actual_video_model in VEO_MODEL_MAP:
-        task_id, submit_raw = submit_veo(args.api_key, actual_video_model, prompt, image_url, aspect_ratio, args.video_resolution)
-        query_type = "veo"
+    generation_signature = stable_hash(
+        {
+            "version": 2,
+            "reverse_signature": reverse_signature,
+            "reverse_prompt": reverse_prompt,
+            "model": actual_video_model,
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "resolution": args.video_resolution,
+            "duration": duration,
+        }
+    )
+    if (
+        not args.force
+        and existing.get("generation_signature") == generation_signature
+        and existing.get("state") == "success"
+        and result_file_valid(output_path, "video")
+    ):
+        existing["cached"] = True
+        print(f"Using verified cached video: {pid}", flush=True)
+        return existing
+
+    task_id = ""
+    query_type = "veo" if actual_video_model in VEO_MODEL_MAP else "jobs"
+    record = dict(existing) if existing.get("generation_signature") == generation_signature else {}
+    if (
+        not args.force
+        and record.get("task_id")
+        and str(record.get("state", "")).lower() in RESUMABLE_STATES
+    ):
+        task_id = str(record["task_id"])
+        query_type = str(record.get("query_type") or query_type)
+        image_url = str(record.get("processed_image_url") or image_url)
+        print(f"Resuming saved video task {task_id} for {pid}", flush=True)
     else:
-        task_id, submit_raw = submit_job(
+        if not image_url:
+            image_url = upload_file(args.api_key, processed_image)
+        if actual_video_model in VEO_MODEL_MAP:
+            task_id, submit_raw = submit_veo(
+                args.api_key,
+                actual_video_model,
+                prompt,
+                image_url,
+                aspect_ratio,
+                args.video_resolution,
+            )
+        else:
+            task_id, submit_raw = submit_job(
+                args.api_key,
+                actual_video_model,
+                video_input_payload(actual_video_model, prompt, image_url, aspect_ratio, args.video_resolution, duration),
+            )
+        record = {
+            "pid": pid,
+            "processed_image": str(processed_image),
+            "source_sha256": source_digest,
+            "processed_image_url": image_url,
+            "video_reverse_provider": "kie",
+            "video_path": "",
+            "expected_output_path": str(output_path),
+            "requested_reverse_model": normalize_reverse_model(args.reverse_model),
+            "video_reverse_model": (reverse_raw.get("_h_meta") or {}).get("actual_model", normalize_reverse_model(args.reverse_model)),
+            "video_reverse_meta_prompt": args.video_reverse_meta_prompt,
+            "video_reverse_prompt": reverse_prompt,
+            "kie_video_prompt": prompt,
+            "video_model_choice": args.video_model,
+            "video_model_label": video_model_label,
+            "video_model": video_model,
+            "actual_video_model": actual_video_model,
+            "duration": duration,
+            "max_duration": video_max_seconds(actual_video_model),
+            "aspect_ratio": aspect_ratio,
+            "video_resolution": args.video_resolution,
+            "reverse_signature": reverse_signature,
+            "generation_signature": generation_signature,
+            "task_id": task_id,
+            "query_type": query_type,
+            "state": "submitted",
+            "video_url": "",
+            "video_reverse_raw": reverse_raw,
+            "submit": submit_raw,
+            "created_at": utc_timestamp(),
+            "updated_at": utc_timestamp(),
+        }
+        write_json_atomic(json_path, record)
+
+    try:
+        state, video_url, final_raw = wait_for_result(
             args.api_key,
-            actual_video_model,
-            video_input_payload(actual_video_model, prompt, image_url, aspect_ratio, args.video_resolution, duration),
+            task_id,
+            query_type,
+            "video",
+            args.timeout,
+            args.poll,
+            args.max_query_errors,
         )
-        query_type = "jobs"
-    state, video_url, final_raw = wait_for_result(args.api_key, task_id, query_type, "video", args.timeout, args.poll, args.max_query_errors)
-    if video_url:
-        download_file(video_url, output_path, "video")
-    record = {
-        "pid": pid,
-        "processed_image": str(processed_image),
-        "processed_image_url": image_url,
-        "video_reverse_provider": "kie",
-        "video_path": str(output_path) if video_url else "",
-        "video_reverse_model": args.reverse_model,
-        "video_reverse_meta_prompt": args.video_reverse_meta_prompt,
-        "video_reverse_prompt": reverse_prompt,
-        "kie_video_prompt": prompt,
-        "video_model_choice": args.video_model,
-        "video_model_label": video_model_label,
-        "video_model": video_model,
-        "actual_video_model": actual_video_model,
-        "duration": duration,
-        "max_duration": video_max_seconds(actual_video_model),
-        "aspect_ratio": aspect_ratio,
-        "task_id": task_id,
-        "state": state,
-        "video_url": video_url,
-        "video_reverse_raw": reverse_raw,
-        "submit": submit_raw,
-        "final": final_raw,
-    }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    text_dir.mkdir(parents=True, exist_ok=True)
-    reverse_path.write_text(reverse_prompt, encoding="utf-8")
-    json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        resolution_raw: dict[str, Any] = {}
+        if video_url and query_type == "veo":
+            video_url, resolution_raw = ensure_veo_resolution(
+                args.api_key,
+                task_id,
+                args.video_resolution,
+                video_url,
+                final_raw,
+                args.timeout,
+                args.poll,
+            )
+        if video_url:
+            download_file(video_url, output_path, "video")
+        resolved_state = "success" if video_url and result_file_valid(output_path, "video") else state
+        if resolved_state == "success" and not video_url:
+            resolved_state = "error"
+        record.update(
+            {
+                "state": resolved_state,
+                "video_path": str(output_path) if video_url else "",
+                "video_url": video_url,
+                "final": final_raw,
+                "resolution_result": resolution_raw,
+                "updated_at": utc_timestamp(),
+            }
+        )
+        if record["state"] == "timeout":
+            record["error_category"] = "timeout"
+            record["error"] = "Task is still saved and will resume on the next run."
+        elif record["state"] == "error" and not video_url:
+            record["error_category"] = "invalid_result"
+            record["error"] = "Kie reported success but returned no generated video URL."
+    except Exception as exc:
+        resumable = isinstance(exc, KieAPIError) and (
+            exc.resumable
+            if exc.resumable is not None
+            else exc.category in {
+                "network",
+                "rate_limit",
+                "maintenance",
+                "provider",
+                "invalid_response",
+                "invalid_result",
+                "resolution_pending",
+            }
+        )
+        record.update(
+            {
+                "state": "waiting" if resumable else "error",
+                "error_category": exception_category(exc),
+                "error": str(exc),
+                "updated_at": utc_timestamp(),
+            }
+        )
+    write_json_atomic(json_path, record)
     return record
 
 
@@ -1364,12 +2075,8 @@ def generate_video_folders_concurrently(args: argparse.Namespace, folders: list[
                 record = future.result()
             except Exception as exc:
                 print(f"Video failed; continuing: {folder.name}/{product.pid}: {exc}", flush=True)
-                record = {
-                    "pid": product.pid,
-                    "processed_image": str(product.path),
-                    "state": "error",
-                    "error": str(exc),
-                }
+                record = failed_record(product.pid, product.path, exc, folder=folder.name)
+                record["processed_image"] = str(product.path)
             manifests[str(folder.path)].append(record)
 
     summaries: list[dict[str, Any]] = []
@@ -1377,7 +2084,8 @@ def generate_video_folders_concurrently(args: argparse.Namespace, folders: list[
         folder, output_dir, text_dir = folder_outputs[key]
         records = sorted(manifests[key], key=lambda item: item.get("pid", ""))
         summary_path = text_dir / "video_manifest.json"
-        summary_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_atomic(summary_path, records)
+        stats = record_stats(records)
         summaries.append(
             {
                 "folder": folder.name,
@@ -1386,6 +2094,7 @@ def generate_video_folders_concurrently(args: argparse.Namespace, folders: list[
                 "video_dir": str(output_dir),
                 "manifest": str(summary_path),
                 "count": len(records),
+                **stats,
                 "workers": workers,
             }
         )
@@ -1404,10 +2113,426 @@ def generate_videos(args: argparse.Namespace) -> int:
     multi_folder = len(folders) > 1 or not collect_images(processed_input_dir)
     summaries = generate_video_folders_concurrently(args, folders, input_dir, multi_folder)
     batch_summary_path = root / "文本" / "h_video_batch_manifest.json"
-    batch_summary_path.parent.mkdir(parents=True, exist_ok=True)
-    batch_summary_path.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"output_root": str(root), "text_dir": str(root / "文本"), "image_dir": str(root / "图像"), "video_dir": str(root / "视频"), "processed_input_dir": str(processed_input_dir), "batch_manifest": str(batch_summary_path), "folders": summaries}, ensure_ascii=False, indent=2))
+    aggregate = {
+        "total": sum(int(item["total"]) for item in summaries),
+        "success": sum(int(item["success"]) for item in summaries),
+        "failed": sum(int(item["failed"]) for item in summaries),
+        "failures": [failure for item in summaries for failure in item["failures"]],
+    }
+    result = {
+        "mode": "批处理",
+        "stage": "视频",
+        "output_root": str(root),
+        "text_dir": str(root / "文本"),
+        "image_dir": str(root / "图像"),
+        "video_dir": str(root / "视频"),
+        "processed_input_dir": str(processed_input_dir),
+        "batch_manifest": str(batch_summary_path),
+        "stats": aggregate,
+        "folders": summaries,
+        "next_actions": next_actions("videos"),
+    }
+    write_json_atomic(batch_summary_path, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return batch_exit_code(aggregate)
+
+
+def model_catalog() -> dict[str, Any]:
+    return {
+        "text": [
+            {"choice": choice, "name": label, "model": model}
+            for choice, (label, model) in TEXT_MODEL_CHOICES.items()
+        ],
+        "image": [
+            {
+                "choice": choice,
+                "name": label,
+                "model": model,
+                "mode": "0张参考图=文生图；上传参考图=图生图",
+                "aspect_ratios": list(ASPECT_RATIO_CHOICES.values()),
+                "resolution_choices": list(IMAGE_RESOLUTION_CHOICES.values()),
+            }
+            for choice, (label, model) in IMAGE_MODEL_CHOICES.items()
+        ],
+        "video": [
+            {
+                "choice": choice,
+                "name": label,
+                "model": model,
+                "max_seconds": video_max_seconds(model),
+                "fixed_seconds": VEO_FIXED_SECONDS if model in VEO_MODEL_MAP else None,
+                "resolution_choices": (
+                    ["继承原Kie任务"]
+                    if model in VIDEO_TRANSFORM_MODELS
+                    else ["720p", "1080p"]
+                    if model in VEO_MODEL_MAP
+                    else ["由模型决定"]
+                    if model == "gemini-omni-video"
+                    else ["480p", "720p", "1080p"]
+                ),
+                "input_rule": (
+                    "已有Kie Grok视频task_id"
+                    if model in VIDEO_TRANSFORM_MODELS
+                    else "Veo: 0图文生，1-2图首尾帧，3图仅Lite/Fast参考图"
+                    if model in VEO_MODEL_MAP
+                    else "Grok: 0图文生，1图图生"
+                    if model.startswith("grok-imagine")
+                    else "Seedance: 0图文生，1图首帧，2图首尾帧，3-9图或含视频/音频走多模态"
+                    if model.startswith("bytedance/seedance")
+                    else "Gemini Omni: 图片 + 2*视频 + 角色ID <= 7，视频最多1个"
+                ),
+            }
+            for choice, (label, model) in VIDEO_MODEL_CHOICES.items()
+        ],
+    }
+
+
+def catalog_command() -> int:
+    print(json.dumps(model_catalog(), ensure_ascii=False, indent=2))
     return 0
+
+
+def doctor_command(args: argparse.Namespace) -> int:
+    credits = check_kie_account(args.api_key, timeout=args.timeout)
+    result = {
+        "ready": True,
+        "kie_api": "ok",
+        "credits": credits,
+        "key_fingerprint": describe_secret(args.api_key),
+        "tls_verification": True,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def single_output_root(args: argparse.Namespace) -> Path:
+    return Path(args.output_dir).expanduser().resolve() if args.output_dir else desktop_dir() / "H返回结果_单处理"
+
+
+def upload_reference(api_key: str, value: str, allowed: set[str], label: str) -> str:
+    if value.startswith(("https://", "http://")):
+        return value
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} does not exist: {path}")
+    if allowed and path.suffix.lower() not in allowed:
+        raise ValueError(f"Unsupported {label} file type: {path.suffix}")
+    return upload_file(api_key, path)
+
+
+def single_result_stem() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+
+
+def single_call(args: argparse.Namespace) -> int:
+    assert_kie_reachable(args)
+    root = single_output_root(args)
+    text_dir = root / "文本"
+    image_dir = root / "图像"
+    video_dir = root / "视频"
+    for folder in (text_dir, image_dir, video_dir):
+        folder.mkdir(parents=True, exist_ok=True)
+    stem = single_result_stem()
+    json_path = text_dir / f"{stem}.json"
+    common = {
+        "mode": "单处理",
+        "kind": args.kind,
+        "output_root": str(root),
+        "text_dir": str(text_dir),
+        "image_dir": str(image_dir),
+        "video_dir": str(video_dir),
+        "prompt": args.prompt,
+        "created_at": utc_timestamp(),
+        "next_actions": next_actions("single"),
+    }
+    try:
+        is_video_transform = args.kind == "video" and resolve_video_model(args.model)[1] in VIDEO_TRANSFORM_MODELS
+        if not args.prompt.strip() and not is_video_transform:
+            raise ValueError("A non-empty --prompt is required for this single model call.")
+        image_urls = [upload_reference(args.api_key, value, IMAGE_EXTENSIONS, "image") for value in args.media]
+        if args.kind == "text":
+            label, model = resolve_text_model(args.model)
+            content, raw = text_with_kie(
+                args.api_key,
+                model,
+                args.prompt,
+                image_urls,
+                timeout=args.timeout,
+                reasoning_effort=args.reasoning_effort,
+            )
+            output_path = text_dir / f"{stem}.txt"
+            write_text_atomic(output_path, content)
+            result = {
+                **common,
+                "state": "success",
+                "model_choice": args.model,
+                "model_label": label,
+                "requested_model": model,
+                "actual_model": (raw.get("_h_meta") or {}).get("actual_model", model),
+                "media_urls": image_urls,
+                "output_path": str(output_path),
+                "raw": raw,
+                "updated_at": utc_timestamp(),
+            }
+            write_json_atomic(json_path, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.kind == "image":
+            label, model = resolve_image_model(args.model)
+            actual_model = resolve_image_generation_model(model, bool(image_urls))
+            task_id, submit_raw = submit_job(
+                args.api_key,
+                actual_model,
+                image_input_payload(actual_model, args.prompt, image_urls, args.aspect_ratio, args.image_resolution),
+            )
+            output_path = image_dir / f"{stem}.png"
+            result = {
+                **common,
+                "state": "submitted",
+                "model_choice": args.model,
+                "model_label": label,
+                "model": actual_model,
+                "media_urls": image_urls,
+                "aspect_ratio": resolve_aspect_ratio(args.aspect_ratio),
+                "image_resolution": resolve_image_resolution(args.image_resolution),
+                "task_id": task_id,
+                "query_type": "jobs",
+                "submit": submit_raw,
+                "output_path": "",
+                "expected_output_path": str(output_path),
+                "updated_at": utc_timestamp(),
+            }
+            write_json_atomic(json_path, result)
+            state, result_url, final_raw = wait_for_result(
+                args.api_key, task_id, "jobs", "image", args.timeout, args.poll, args.max_query_errors
+            )
+            if result_url and result_url in image_urls:
+                raise KieAPIError(
+                    "invalid_result",
+                    "Kie returned a reference image URL instead of a generated result.",
+                    resumable=False,
+                )
+            if result_url:
+                download_file(result_url, output_path, "image")
+            result.update(
+                {
+                    "state": "success" if result_url and result_file_valid(output_path, "image") else state,
+                    "result_url": result_url,
+                    "output_path": str(output_path) if result_url else "",
+                    "final": final_raw,
+                    "updated_at": utc_timestamp(),
+                }
+            )
+            if result["state"] == "success" and not result_url:
+                result["state"] = "error"
+                result["error_category"] = "invalid_result"
+                result["error"] = "Kie reported success but returned no generated image URL."
+            write_json_atomic(json_path, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["state"] == "success" else 1
+
+        label, model = resolve_video_model(args.model)
+        video_urls = [upload_reference(args.api_key, value, VIDEO_EXTENSIONS, "video") for value in args.video_ref]
+        audio_urls = [upload_reference(args.api_key, value, AUDIO_EXTENSIONS, "audio") for value in args.audio_ref]
+        actual_model = resolve_video_generation_model(model, bool(image_urls))
+        duration = 0 if actual_model in VIDEO_TRANSFORM_MODELS else resolve_video_duration(args.duration, actual_model)
+        if actual_model in VEO_MODEL_MAP:
+            if args.video_resolution == "480p":
+                raise ValueError("Veo3.1 does not provide a 480p output option; choose 720p or 1080p.")
+            if video_urls or audio_urls:
+                raise ValueError("Veo3.1 does not accept video or audio references.")
+            task_id, submit_raw = submit_veo(
+                args.api_key,
+                actual_model,
+                args.prompt,
+                image_urls,
+                args.aspect_ratio,
+                args.video_resolution,
+            )
+            query_type = "veo"
+        else:
+            payload = video_input_payload(
+                actual_model,
+                args.prompt,
+                image_urls,
+                args.aspect_ratio,
+                args.video_resolution,
+                duration,
+                video_urls=video_urls,
+                audio_urls=audio_urls,
+                audio_ids=args.audio_id,
+                character_ids=args.character_id,
+                source_task_id=args.source_task_id,
+                extend_at=args.extend_at,
+                extend_times=args.extend_times,
+            )
+            task_id, submit_raw = submit_job(args.api_key, actual_model, payload)
+            query_type = "jobs"
+        output_path = video_dir / f"{stem}.mp4"
+        result = {
+            **common,
+            "state": "submitted",
+            "model_choice": args.model,
+            "model_label": label,
+            "model": actual_model,
+            "image_urls": image_urls,
+            "video_urls": video_urls,
+            "audio_urls": audio_urls,
+            "audio_ids": args.audio_id,
+            "character_ids": args.character_id,
+            "duration": duration,
+            "max_duration": video_max_seconds(actual_model),
+            "aspect_ratio": resolve_aspect_ratio(args.aspect_ratio),
+            "video_resolution": args.video_resolution,
+            "task_id": task_id,
+            "query_type": query_type,
+            "submit": submit_raw,
+            "output_path": "",
+            "expected_output_path": str(output_path),
+            "updated_at": utc_timestamp(),
+        }
+        write_json_atomic(json_path, result)
+        state, result_url, final_raw = wait_for_result(
+            args.api_key, task_id, query_type, "video", args.timeout, args.poll, args.max_query_errors
+        )
+        resolution_raw: dict[str, Any] = {}
+        if result_url and query_type == "veo":
+            result_url, resolution_raw = ensure_veo_resolution(
+                args.api_key,
+                task_id,
+                args.video_resolution,
+                result_url,
+                final_raw,
+                args.timeout,
+                args.poll,
+            )
+        if result_url:
+            download_file(result_url, output_path, "video")
+        result.update(
+            {
+                "state": "success" if result_url and result_file_valid(output_path, "video") else state,
+                "result_url": result_url,
+                "output_path": str(output_path) if result_url else "",
+                "final": final_raw,
+                "resolution_result": resolution_raw,
+                "updated_at": utc_timestamp(),
+            }
+        )
+        if result["state"] == "success" and not result_url:
+            result["state"] = "error"
+            result["error_category"] = "invalid_result"
+            result["error"] = "Kie reported success but returned no generated video URL."
+        write_json_atomic(json_path, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["state"] == "success" else 1
+    except Exception as exc:
+        category = exception_category(exc)
+        previous = load_json(json_path)
+        resumable = bool(previous.get("task_id")) and isinstance(exc, KieAPIError) and (
+            exc.resumable
+            if exc.resumable is not None
+            else category in {"network", "rate_limit", "maintenance", "provider", "invalid_response", "invalid_result", "resolution_pending"}
+        )
+        result = {
+            **common,
+            "state": "waiting" if resumable else "error",
+            "error_category": category,
+            "error": str(exc),
+            "updated_at": utc_timestamp(),
+        }
+        if previous:
+            result = {**previous, **result}
+        write_json_atomic(json_path, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1
+
+
+def resume_command(args: argparse.Namespace) -> int:
+    assert_kie_reachable(args)
+    record_path = Path(args.record).expanduser().resolve()
+    record = load_json(record_path)
+    if not record:
+        raise ValueError(f"Invalid or empty H task record: {record_path}")
+    task_id = str(record.get("task_id") or "")
+    if not task_id:
+        raise ValueError(f"H task record has no task_id: {record_path}")
+    query_type = str(record.get("query_type") or "jobs")
+    kind = str(record.get("kind") or "")
+    if kind not in {"image", "video"}:
+        kind = "video" if any(key in record for key in ("video_model", "actual_video_model", "video_path")) else "image"
+    output_value = str(record.get("expected_output_path") or record.get("output_path") or "")
+    if not output_value:
+        raise ValueError(f"H task record has no expected output path: {record_path}")
+    output_path = Path(output_value).expanduser().resolve()
+    stage = "single" if record.get("mode") == "单处理" else ("videos" if kind == "video" else "images")
+    try:
+        state, result_url, final_raw = wait_for_result(
+            args.api_key,
+            task_id,
+            query_type,
+            kind,
+            args.timeout,
+            args.poll,
+            args.max_query_errors,
+        )
+        resolution_raw: dict[str, Any] = {}
+        if result_url and query_type == "veo":
+            requested_resolution = str(record.get("video_resolution") or "720p")
+            result_url, resolution_raw = ensure_veo_resolution(
+                args.api_key,
+                task_id,
+                requested_resolution,
+                result_url,
+                final_raw,
+                args.timeout,
+                args.poll,
+            )
+        if result_url:
+            download_file(result_url, output_path, kind)
+        resolved_state = "success" if result_url and result_file_valid(output_path, kind) else state
+        if resolved_state == "success" and not result_url:
+            resolved_state = "error"
+        record.update(
+            {
+                "state": resolved_state,
+                "result_url": result_url,
+                "output_path": str(output_path) if result_url else "",
+                "final": final_raw,
+                "resolution_result": resolution_raw,
+                "updated_at": utc_timestamp(),
+                "next_actions": next_actions(stage),
+            }
+        )
+        if kind == "image":
+            record["processed_path"] = str(output_path) if result_url else ""
+        else:
+            record["video_path"] = str(output_path) if result_url else ""
+        if resolved_state == "timeout":
+            record["error_category"] = "timeout"
+            record["error"] = "Task remains saved; run resume again later."
+        elif resolved_state == "error":
+            record["error_category"] = "invalid_result"
+            record["error"] = f"Kie returned no generated {kind} URL."
+    except Exception as exc:
+        category = exception_category(exc)
+        resumable = isinstance(exc, KieAPIError) and (
+            exc.resumable
+            if exc.resumable is not None
+            else category in {"network", "rate_limit", "maintenance", "provider", "invalid_result", "resolution_pending"}
+        )
+        record.update(
+            {
+                "state": "waiting" if resumable else "error",
+                "error_category": category,
+                "error": str(exc),
+                "updated_at": utc_timestamp(),
+                "next_actions": next_actions(stage),
+            }
+        )
+    write_json_atomic(record_path, record)
+    print(json.dumps(record, ensure_ascii=False, indent=2))
+    return 0 if record.get("state") == "success" else 1
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -1435,7 +2560,48 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Two-stage Kie PID product image and video workflow.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     image_model_ids = {model for _label, model in IMAGE_MODEL_CHOICES.values()}
-    video_model_ids = {model for _label, model in VIDEO_MODEL_CHOICES.values()}
+    video_model_ids = {model for _label, model in VIDEO_MODEL_CHOICES.values() if model not in VIDEO_TRANSFORM_MODELS}
+    video_model_keys = {choice for choice, (_label, model) in VIDEO_MODEL_CHOICES.items() if model not in VIDEO_TRANSFORM_MODELS}
+
+    subparsers.add_parser("catalog", help="List every selectable text, image, and video model with its constraints.")
+
+    doctor = subparsers.add_parser("doctor", help="Validate the Kie key, TLS connection, and available credits.")
+    doctor.add_argument("--api-key", default="", help="Kie API key. Defaults to env/user secret files.")
+    doctor.add_argument("--timeout", type=int, default=15)
+
+    resume = subparsers.add_parser("resume", help="Resume polling a previously submitted H task record without resubmitting it.")
+    resume.add_argument("record", help="Path to a .json task record written by H.")
+    resume.add_argument("--api-key", default="")
+    resume.add_argument("--timeout", type=int, default=900)
+    resume.add_argument("--poll", type=int, default=10)
+    resume.add_argument("--max-query-errors", type=int, default=3)
+    resume.add_argument("--preflight-timeout", type=int, default=15)
+    resume.add_argument("--skip-preflight", action="store_true")
+
+    single = subparsers.add_parser("single", help="Call one selected Kie text, image, or video model.")
+    single.add_argument("--kind", required=True, choices=["text", "image", "video"])
+    single.add_argument("--model", required=True, help="Number or model ID from the catalog command.")
+    single.add_argument("--prompt", default="")
+    single.add_argument("--media", action="append", default=[], help="Local image path or image URL. Repeat for multiple images.")
+    single.add_argument("--video-ref", action="append", default=[], help="Local video path or video URL. Repeat when supported.")
+    single.add_argument("--audio-ref", action="append", default=[], help="Local audio path or audio URL. Repeat when supported.")
+    single.add_argument("--audio-id", action="append", default=[], help="Gemini Omni audio ID. Repeat when needed.")
+    single.add_argument("--character-id", action="append", default=[], help="Gemini Omni character ID. Repeat when needed.")
+    single.add_argument("--source-task-id", default="", help="Required for Grok upscale/extend.")
+    single.add_argument("--extend-at", type=int, default=2)
+    single.add_argument("--extend-times", type=int, default=1)
+    single.add_argument("--aspect-ratio", default="2", choices=["1", "2", "9:16", "16:9"])
+    single.add_argument("--image-resolution", default="1", choices=["", "1", "2", "3", "1K", "2K", "4K"])
+    single.add_argument("--video-resolution", default="720p", choices=["480p", "720p", "1080p"])
+    single.add_argument("--duration", type=int, default=0, choices=[0] + VIDEO_DURATION_CHOICES)
+    single.add_argument("--reasoning-effort", default="high", choices=["low", "medium", "high", "xhigh"])
+    single.add_argument("--api-key", default="")
+    single.add_argument("--timeout", type=int, default=900)
+    single.add_argument("--poll", type=int, default=10)
+    single.add_argument("--max-query-errors", type=int, default=3)
+    single.add_argument("--preflight-timeout", type=int, default=15)
+    single.add_argument("--skip-preflight", action="store_true")
+    single.add_argument("--output-dir", default="")
 
     process = subparsers.add_parser("process-images", help="Process original PID product images into cleaned product images.")
     add_common_args(process)
@@ -1460,7 +2626,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     video.add_argument(
         "--video-model",
         default="3",
-        choices=sorted(set(VIDEO_MODEL_CHOICES) | video_model_ids | set(VEO_MODEL_MAP)),
+        choices=sorted(video_model_keys | video_model_ids | set(VEO_MODEL_MAP)),
         help="Video model choice: 1=Grok Imagine, 2=Grok 1.5 Preview, 3=Veo3.1 Lite, 4=Veo3.1 Fast, 5=Veo3.1 Quality, 6=Gemini Omni, 7=Seedance 2.0, 8=Seedance 2.0 Fast, 9=Seedance 2.0 Mini. The script chooses image/text endpoint from whether an input image is present.",
     )
     video.add_argument("--aspect-ratio", default="2", choices=["1", "2", "9:16", "16:9"], help="Aspect ratio: 1=9:16, 2=16:9.")
@@ -1468,7 +2634,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     video.add_argument("--duration", type=int, default=0, choices=[0] + VIDEO_DURATION_CHOICES, help="Video duration in seconds. 0=auto; only confirmed model maximums are blocked before submission.")
 
     args = parser.parse_args(argv)
-    args.api_key = load_api_key(args.api_key)
+    if args.command == "catalog":
+        return args
+    args.api_key = load_api_key(getattr(args, "api_key", ""))
     if not args.api_key:
         parser.error("Missing Kie API key. Pass --api-key, set KIE_API_KEY/H_KIE_API_KEY, or create a local H key file.")
     return args
@@ -1501,6 +2669,14 @@ def main(argv: list[str]) -> int:
     except Exception:
         pass
     args = parse_args(argv)
+    if args.command == "catalog":
+        return catalog_command()
+    if args.command == "doctor":
+        return doctor_command(args)
+    if args.command == "single":
+        return single_call(args)
+    if args.command == "resume":
+        return resume_command(args)
     if args.command == "process-images":
         return process_images(args)
     if args.command == "generate-videos":
