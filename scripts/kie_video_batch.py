@@ -51,6 +51,29 @@ IMAGE_MODEL_PAYLOADS = {
     "seedream/5-lite-image-to-image": "image_urls",
 }
 
+# Kie model input limits from each model's current OpenAPI schema. Family IDs
+# are included because single mode resolves them to text/image endpoints after
+# checking whether reference images were supplied.
+IMAGE_MODEL_REFERENCE_LIMITS = {
+    "gpt-image-2": 16,
+    "gpt-image-2-text-to-image": 0,
+    "gpt-image-2-image-to-image": 16,
+    "google/nano-banana": 10,
+    "google/nano-banana-edit": 10,
+    "nano-banana-pro": 8,
+    "nano-banana-2": 14,
+    "nano-banana-2-lite": 10,
+    "seedream/5-lite": 14,
+    "seedream/5-lite-text-to-image": 0,
+    "seedream/5-lite-image-to-image": 14,
+}
+
+IMAGE_MODELS_REQUIRING_REFERENCES = {
+    "gpt-image-2-image-to-image",
+    "google/nano-banana-edit",
+    "seedream/5-lite-image-to-image",
+}
+
 IMAGE_MODEL_CHOICES = {
     "1": ("GPT Image-2", "gpt-image-2"),
     "2": ("Nano Banana", "google/nano-banana"),
@@ -1261,6 +1284,27 @@ def resolve_image_resolution(value: str) -> str:
     raise ValueError(f"Unsupported image resolution choice: {value}")
 
 
+def image_reference_limit(model: str) -> int:
+    try:
+        return IMAGE_MODEL_REFERENCE_LIMITS[model]
+    except KeyError as exc:
+        raise ValueError(f"No reference-image limit is registered for image model: {model}") from exc
+
+
+def validate_image_references(model: str, image_urls: list[str]) -> None:
+    limit = image_reference_limit(model)
+    count = len(image_urls)
+    if count > limit:
+        raise ValueError(f"{model} supports at most {limit} reference images, but {count} were provided.")
+    if count == 0 and model in IMAGE_MODELS_REQUIRING_REFERENCES:
+        raise ValueError(f"{model} requires at least one reference image.")
+    if count and not IMAGE_MODEL_PAYLOADS[model]:
+        raise ValueError(
+            f"{model} is a text-to-image endpoint and cannot accept reference images; "
+            "select the model family so H can route to image-to-image automatically."
+        )
+
+
 def video_max_seconds(model: str) -> int | None:
     return VIDEO_MODEL_MAX_SECONDS.get(model)
 
@@ -1299,18 +1343,11 @@ def image_input_payload(
     resolution = resolve_image_resolution(resolution)
     field = IMAGE_MODEL_PAYLOADS[model]
     image_urls = normalize_media_urls(image_url)
-    if model == "nano-banana-2-lite" and len(image_urls) > 10:
-        raise ValueError("Nano Banana 2 Lite supports at most 10 reference images.")
+    validate_image_references(model, image_urls)
     payload: dict[str, Any] = {"prompt": prompt}
     if field:
         if image_urls:
             payload[field] = image_urls
-        elif model in {
-            "gpt-image-2-image-to-image",
-            "google/nano-banana-edit",
-            "seedream/5-lite-image-to-image",
-        }:
-            raise ValueError(f"{model} requires at least one reference image.")
     if model in {"gpt-image-2-text-to-image", "gpt-image-2-image-to-image"}:
         payload["aspect_ratio"] = aspect_ratio
     elif model in {"google/nano-banana", "google/nano-banana-edit"}:
@@ -2165,7 +2202,9 @@ def model_catalog() -> dict[str, Any]:
                 "choice": choice,
                 "name": label,
                 "model": model,
-                "mode": "0张参考图=文生图；上传参考图=图生图",
+                "mode": f"0张参考图=文生图；1-{image_reference_limit(model)}张参考图=多图参考生成",
+                "max_reference_images": image_reference_limit(model),
+                "reference_usage": "多张图片会一起进入同一个生成任务；每张图片都必须作为独立 --media 传入",
                 "aspect_ratios": list(ASPECT_RATIO_CHOICES.values()),
                 "resolution_choices": list(IMAGE_RESOLUTION_CHOICES.values()),
             }
@@ -2599,7 +2638,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     single.add_argument("--kind", required=True, choices=["text", "image", "video"])
     single.add_argument("--model", required=True, help="Number or model ID from the catalog command.")
     single.add_argument("--prompt", default="")
-    single.add_argument("--media", action="append", default=[], help="Local image path or image URL. Repeat for multiple images.")
+    single.add_argument(
+        "--media",
+        action="append",
+        default=[],
+        help="Local image path or image URL. Repeat once per reference image; H enforces the selected model's limit.",
+    )
     single.add_argument("--video-ref", action="append", default=[], help="Local video path or video URL. Repeat when supported.")
     single.add_argument("--audio-ref", action="append", default=[], help="Local audio path or audio URL. Repeat when supported.")
     single.add_argument("--audio-id", action="append", default=[], help="Gemini Omni audio ID. Repeat when needed.")

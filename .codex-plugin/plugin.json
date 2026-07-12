@@ -1,6 +1,6 @@
 {
   "name": "h",
-  "version": "0.2.0+codex.20260712111815",
+  "version": "0.2.0+codex.20260712123553",
   "description": "Portable Kie-only batch and single-call workflow for text, image, and video generation.",
   "author": {
     "name": "XIAOH"

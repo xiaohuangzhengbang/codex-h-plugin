@@ -86,8 +86,22 @@ Batch videos:
 Single call:
 
 ```bash
-./scripts/h_run.sh single --kind image --model 1 --prompt "Product lookbook photo" --media "/path/to/reference.png"
+./scripts/h_run.sh single --kind image --model 1 --prompt "Product lookbook photo" \
+  --media "/path/to/front.png" --media "/path/to/back.png" --media "/path/to/detail.png"
 ```
+
+Each repeated `--media` is another reference image for the same generation task. H preserves their order and validates the selected Kie model before submission:
+
+| Image model | Reference images per single generation |
+| --- | ---: |
+| GPT Image-2 | 0-16 |
+| Nano Banana | 0-10 |
+| Nano Banana Pro | 0-8 |
+| Nano Banana 2 | 0-14 |
+| Nano Banana 2 Lite | 0-10 |
+| Seedream 5.0 Lite | 0-14 |
+
+Zero reference images routes to text-to-image. One or more routes to reference-image generation. In batch mode, source images remain separate concurrent jobs; use single mode only when multiple references should jointly produce one result.
 
 Resume an already submitted task without paying for a duplicate submission:
 

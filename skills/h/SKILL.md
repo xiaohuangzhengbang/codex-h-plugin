@@ -53,7 +53,7 @@ scripts\h_run.cmd catalog
 ```
 
 - 文本：GPT 5.5 Response、GPT 5.4 Response、Gemini 3.1 Pro、Gemini 3 Pro、Gemini 3.5 Flash、Gemini 3 Flash。
-- 图像：GPT Image-2、Nano Banana、Nano Banana Pro、Nano Banana 2、Nano Banana 2 Lite、Seedream 5.0 Lite。
+- 图像：GPT Image-2、Nano Banana、Nano Banana Pro、Nano Banana 2、Nano Banana 2 Lite、Seedream 5.0 Lite。列模型时必须同时显示每次生成可上传的参考图上限。
 - 视频：Grok Imagine、Grok Imagine Video 1.5 Preview、Veo3.1 Lite/Fast/Quality、Gemini Omni Video、Seedance 2.0/Fast/Mini；单处理另可选 Grok Upscale/Extend。
 
 GPT 5.5 暂时不可用时脚本自动回退 GPT 5.4；鉴权、额度或参数错误不得回退。JSON 记录必须显示请求模型、实际模型和是否回退。
@@ -66,12 +66,12 @@ GPT 5.5 暂时不可用时脚本自动回退 GPT 5.4；鉴权、额度或参数�
 请选择图片参数，按顺序回复：图片模型 分辨率 比例
 
 图片模型：
-1. GPT Image-2
-2. Nano Banana
-3. Nano Banana Pro
-4. Nano Banana 2
-5. Nano Banana 2 Lite
-6. Seedream 5.0 Lite
+1. GPT Image-2（0 图文生图；1-16 图多图参考）
+2. Nano Banana（0 图文生图；1-10 图多图参考）
+3. Nano Banana Pro（0 图文生图；1-8 图多图参考）
+4. Nano Banana 2（0 图文生图；1-14 图多图参考）
+5. Nano Banana 2 Lite（0 图文生图；1-10 图多图参考）
+6. Seedream 5.0 Lite（0 图文生图；1-14 图多图参考）
 
 分辨率：
 1. 1K
@@ -96,6 +96,8 @@ scripts/h_run.sh process-images <根目录> --image-model <编号> --image-resol
 ```
 
 `--workers 0` 表示整棵目录按项目数并发，最多 64；不要改成逐项等待。每个 PID 使用自己的原图进行 Kie 多模态反推，再用同一原图生成，不能跨 PID 复用提示词。
+
+批处理中的多张源图是多个独立商品任务，必须整批并发；不能把不同 PID 合并成同一次多图参考生成。要让多张参考图共同生成一个结果，应使用单处理。
 
 图片完成后，必须显示输出根目录、成功数、失败数和失败 PID/类别，然后显示：
 
@@ -128,6 +130,8 @@ scripts/h_run.sh generate-videos <同一根目录> --video-model <编号> --dura
 
 运行 `catalog` 后让用户选择文本、图像或视频模型，并在同一轮收齐该模型需要的 prompt、媒体、比例、分辨率、时长。图像和视频模型根据媒体自动路由：0 图走文生，上传图走图生。
 
+单处理选择图像模型时，必须把该模型的参考图上限与比例、分辨率一起列出，并明确允许用户一次附上多张图片。收到多张图片后要全部保留，按原顺序为每张图片重复传入一个 `--media`，不能只取第一张。多张参考图共同进入一个 Kie 生成任务；若用户希望每张图各自生成一个结果，应切换批处理。
+
 ```text
 scripts/h_run.sh single --kind <text|image|video> --model <编号> --prompt <提示词> [模型参数]
 ```
@@ -152,6 +156,7 @@ scripts/h_run.sh resume <JSON任务记录路径>
 
 ## 输入规则
 
+- 图片模型：GPT Image-2 最多 16 图；Nano Banana 最多 10 图；Nano Banana Pro 最多 8 图；Nano Banana 2 最多 14 图；Nano Banana 2 Lite 最多 10 图；Seedream 5.0 Lite 最多 14 图。0 图自动文生图，1 图或多图自动走该模型的参考图生成；超过对应上限在提交前直接报错。
 - Veo：0 图文生；1-2 图首尾帧；3 图仅 Lite/Fast 参考图；超过 3 图报错；不允许视频/音频。
 - Grok：0 图文生；1 图图生；超过 1 图报错；不允许视频/音频。
 - Seedance：0 图文生；1 图首帧；2 图首尾帧；3-9 图或含视频/音频时走多模态参考。

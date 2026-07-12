@@ -218,15 +218,75 @@ def test_response_output_text_extracts_kie_responses_text():
 
 def test_gpt_image_2_text_payload_has_no_source_image_field():
     batch = load_batch_module()
-    payload = batch.image_input_payload(
-        "gpt-image-2-text-to-image",
-        "prompt",
-        "https://example.com/source.png",
-        "16:9",
-        "1K",
-    )
+    payload = batch.image_input_payload("gpt-image-2-text-to-image", "prompt", [], "16:9", "1K")
 
     assert payload == {"prompt": "prompt", "aspect_ratio": "16:9"}
+    try:
+        batch.image_input_payload(
+            "gpt-image-2-text-to-image",
+            "prompt",
+            ["https://example.com/reference.png"],
+            "16:9",
+            "1K",
+        )
+    except ValueError as exc:
+        assert "at most 0 reference images" in str(exc)
+    else:
+        raise AssertionError("Expected a text-to-image endpoint to reject reference images")
+
+
+def test_image_payload_preserves_multiple_references_and_enforces_every_model_limit():
+    batch = load_batch_module()
+    limits = {
+        "gpt-image-2-image-to-image": ("input_urls", 16),
+        "google/nano-banana-edit": ("image_urls", 10),
+        "nano-banana-pro": ("image_input", 8),
+        "nano-banana-2": ("image_input", 14),
+        "nano-banana-2-lite": ("image_urls", 10),
+        "seedream/5-lite-image-to-image": ("image_urls", 14),
+    }
+
+    for model, (field, limit) in limits.items():
+        references = [f"https://example.com/reference-{index}.png" for index in range(limit)]
+        payload = batch.image_input_payload(model, "prompt", references, "9:16", "1K")
+        assert payload[field] == references
+        try:
+            batch.image_input_payload(
+                model,
+                "prompt",
+                [*references, "https://example.com/too-many.png"],
+                "9:16",
+                "1K",
+            )
+        except ValueError as exc:
+            assert f"at most {limit} reference images" in str(exc)
+        else:
+            raise AssertionError(f"Expected {model} to reject more than {limit} reference images")
+
+
+def test_single_parser_keeps_every_repeated_image_reference():
+    batch = load_batch_module()
+    args = batch.parse_args(
+        [
+            "single",
+            "--kind",
+            "image",
+            "--model",
+            "1",
+            "--api-key",
+            "test-key",
+            "--prompt",
+            "combine references",
+            "--media",
+            "front.png",
+            "--media",
+            "back.png",
+            "--media",
+            "detail.png",
+        ]
+    )
+
+    assert args.media == ["front.png", "back.png", "detail.png"]
 
 
 def test_gpt_image_2_image_payload_uses_input_urls():
@@ -666,6 +726,14 @@ def test_catalog_lists_all_models_without_a_key_and_includes_follow_up_actions()
     assert args.command == "catalog"
     assert len(catalog["text"]) == 6
     assert len(catalog["image"]) == 6
+    assert {item["model"]: item["max_reference_images"] for item in catalog["image"]} == {
+        "gpt-image-2": 16,
+        "google/nano-banana": 10,
+        "nano-banana-pro": 8,
+        "nano-banana-2": 14,
+        "nano-banana-2-lite": 10,
+        "seedream/5-lite": 14,
+    }
     assert {item["model"] for item in catalog["video"]} >= {"grok-imagine/upscale", "grok-imagine/extend"}
     assert batch.next_actions("images")[0]["action"] == "继续生成视频"
     assert "不重复提交" in batch.next_actions("single")[0]["action"]
@@ -807,6 +875,8 @@ if __name__ == "__main__":
     test_default_reverse_model_is_gpt_5_5()
     test_response_output_text_extracts_kie_responses_text()
     test_gpt_image_2_text_payload_has_no_source_image_field()
+    test_image_payload_preserves_multiple_references_and_enforces_every_model_limit()
+    test_single_parser_keeps_every_repeated_image_reference()
     test_gpt_image_2_image_payload_uses_input_urls()
     test_seedance_video_payload_uses_first_frame_url_and_model_controls()
     test_video_payloads_route_media_counts_by_model()
