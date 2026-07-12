@@ -151,6 +151,23 @@ class KieAPIError(RuntimeError):
         super().__init__(f"[{category}] {message}")
 
 
+def configure_utf8_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
+def print_json(value: Any) -> None:
+    configure_utf8_output()
+    payload = json.dumps(value, ensure_ascii=False, indent=2)
+    try:
+        print(payload, flush=True)
+    except UnicodeEncodeError:
+        print(json.dumps(value, ensure_ascii=True, indent=2), flush=True)
+
+
 @dataclass
 class ProductImage:
     pid: str
@@ -1845,7 +1862,7 @@ def process_images(args: argparse.Namespace) -> int:
         "next_actions": next_actions("images"),
     }
     write_json_atomic(summary_path, result)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print_json(result)
     return batch_exit_code(aggregate)
 
 
@@ -2133,7 +2150,7 @@ def generate_videos(args: argparse.Namespace) -> int:
         "next_actions": next_actions("videos"),
     }
     write_json_atomic(batch_summary_path, result)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print_json(result)
     return batch_exit_code(aggregate)
 
 
@@ -2188,7 +2205,7 @@ def model_catalog() -> dict[str, Any]:
 
 
 def catalog_command() -> int:
-    print(json.dumps(model_catalog(), ensure_ascii=False, indent=2))
+    print_json(model_catalog())
     return 0
 
 
@@ -2201,7 +2218,7 @@ def doctor_command(args: argparse.Namespace) -> int:
         "key_fingerprint": describe_secret(args.api_key),
         "tls_verification": True,
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print_json(result)
     return 0
 
 
@@ -2275,7 +2292,7 @@ def single_call(args: argparse.Namespace) -> int:
                 "updated_at": utc_timestamp(),
             }
             write_json_atomic(json_path, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print_json(result)
             return 0
 
         if args.kind == "image":
@@ -2329,7 +2346,7 @@ def single_call(args: argparse.Namespace) -> int:
                 result["error_category"] = "invalid_result"
                 result["error"] = "Kie reported success but returned no generated image URL."
             write_json_atomic(json_path, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print_json(result)
             return 0 if result["state"] == "success" else 1
 
         label, model = resolve_video_model(args.model)
@@ -2424,7 +2441,7 @@ def single_call(args: argparse.Namespace) -> int:
             result["error_category"] = "invalid_result"
             result["error"] = "Kie reported success but returned no generated video URL."
         write_json_atomic(json_path, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
         return 0 if result["state"] == "success" else 1
     except Exception as exc:
         category = exception_category(exc)
@@ -2444,7 +2461,7 @@ def single_call(args: argparse.Namespace) -> int:
         if previous:
             result = {**previous, **result}
         write_json_atomic(json_path, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print_json(result)
         return 1
 
 
@@ -2531,7 +2548,7 @@ def resume_command(args: argparse.Namespace) -> int:
             }
         )
     write_json_atomic(record_path, record)
-    print(json.dumps(record, ensure_ascii=False, indent=2))
+    print_json(record)
     return 0 if record.get("state") == "success" else 1
 
 
@@ -2663,11 +2680,7 @@ def load_api_key(explicit: str) -> str:
 
 
 def main(argv: list[str]) -> int:
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    configure_utf8_output()
     args = parse_args(argv)
     if args.command == "catalog":
         return catalog_command()

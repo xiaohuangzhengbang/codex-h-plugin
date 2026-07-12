@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -777,6 +778,21 @@ def test_veo_1080p_uses_dedicated_result_endpoint():
     assert calls[0][2] == {"taskId": "veo-task", "index": 0}
 
 
+def test_print_json_reconfigures_a_legacy_windows_code_page():
+    batch = load_batch_module()
+    original = sys.stdout
+    raw = io.BytesIO()
+    legacy_stream = io.TextIOWrapper(raw, encoding="cp1252")
+    try:
+        sys.stdout = legacy_stream
+        batch.print_json({"message": "中文输出"})
+        legacy_stream.flush()
+        rendered = raw.getvalue().decode("utf-8")
+    finally:
+        sys.stdout = original
+    assert "中文输出" in rendered
+
+
 if __name__ == "__main__":
     test_kie_result_url_prefers_result_json_over_param()
     test_kie_result_url_ignores_input_fallback_when_result_json_exists()
@@ -814,4 +830,5 @@ if __name__ == "__main__":
     test_repository_test_data_contains_no_key_shaped_literal()
     test_single_image_without_media_routes_to_text_to_image_and_writes_three_folders()
     test_veo_1080p_uses_dedicated_result_endpoint()
+    test_print_json_reconfigures_a_legacy_windows_code_page()
     print("kie_result_url regression tests passed")
