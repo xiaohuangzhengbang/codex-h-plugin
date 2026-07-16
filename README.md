@@ -1,47 +1,70 @@
 # H Codex Plugin
 
-H is a Kie-only Codex plugin with two user-facing modes:
+H 是只使用 Kie 的 Codex 插件，所有电脑统一为两个模式：
 
-1. Batch processing: recursively process every eligible PID image under one root with whole-root concurrency.
-2. Single processing: call one selected Kie text, image, video, upscale, or extend model.
+1. 批处理：递归扫描整个根目录，把所有 PID 图片一次性放进同一个并发池。
+2. 单处理：只调用一次所选的 Kie 文本、图像、视频、放大或延长模型。
 
-## Install From GitHub
+## 从 GitHub 安装
 
-Add this repository as a Codex plugin marketplace:
+在 Codex 中把下面仓库添加为插件 marketplace，然后安装或启用 `h`：
 
 ```text
 https://github.com/xiaohuangzhengbang/codex-h-plugin.git
 ```
 
-CLI equivalent:
+仓库根目录已经包含 `.agents/plugins/marketplace.json` 和 `.codex-plugin/plugin.json`。安装后直接调用 H，不需要先运行安装命令。
 
-```bash
-codex plugin marketplace add https://github.com/xiaohuangzhengbang/codex-h-plugin.git
-```
+## 首次自动准备
 
-Then install or enable `h` from the `codex-h-plugin` marketplace. The repository root already contains both `.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json`.
+第一次调用 H 时，插件会自动完成：
 
-## First Use
+1. 识别 Windows、Intel Mac 或 Apple Silicon Mac。
+2. 优先寻找 Codex Desktop 自带 Python 3.10+。
+3. 找不到时尝试系统 Python；Windows 最后使用 `winget` 自动安装用户级 Python 3.12，Mac 在已有 Homebrew 时自动安装 `python@3.12`。
+4. 在 `<home>/.codex/cache/h` 创建独立可复用环境。
+5. 扫描 `requirements.txt` 和实际 import，自动安装或修复缺失依赖。
+6. 检查桌面写入权限；有 Kie Key 时验证一次接口并缓存 ready 状态。
 
-H supports Windows, Intel Mac, and Apple Silicon Mac. Its launcher creates one reusable environment under `<home>/.codex/cache/h`; plugin updates do not reinstall dependencies unless `requirements.txt` changes.
+插件更新或依赖变化时会自动建立新环境。平时启动只做快速检查，不会每次重装或长时间验证。
 
-Windows:
+Windows 手动检查入口：
 
 ```powershell
-scripts\h_run.cmd doctor
+scripts\h_run.cmd start
 ```
 
-macOS:
+macOS 手动检查入口：
 
 ```bash
-./scripts/h_run.sh doctor
+./scripts/h_run.sh start
 ```
 
-Requirements are Python 3.10+, Python `venv`, and network access on the first run. Runtime dependencies are installed automatically.
+## 固定交互
+
+菜单由 `scripts/h_run.py` 的固定状态协议生成，技能只能逐字展示返回的 `display_text`，不能自行推荐、改写或遗漏选项。首屏始终是：
+
+```text
+哈喽小杨，你又开始工作啦，想不想小黄啊？
+
+请选择处理模式，回复编号即可：
+1. 批处理
+2. 单处理
+```
+
+查看任一固定菜单：
+
+```bash
+./scripts/h_run.sh protocol mode
+./scripts/h_run.sh protocol batch-image
+./scripts/h_run.sh protocol single-video
+```
+
+Windows 把 `./scripts/h_run.sh` 替换为 `scripts\h_run.cmd`。
 
 ## Kie Key
 
-API keys are never stored in Git. Configure one source once:
+Key 不会提交到 Git。配置以下任一来源即可：
 
 ```text
 H_KIE_API_KEY
@@ -49,91 +72,66 @@ KIE_API_KEY
 <home>/.codex/secrets/h_kie_api_key.txt
 ```
 
-The launcher also provides an interactive local setup command:
+交互式本地设置：
 
 ```bash
 ./scripts/h_run.sh set-key
 ```
 
-On Windows, use `scripts\h_run.cmd set-key`.
+Windows 使用 `scripts\h_run.cmd set-key`。主动重新验证 Key、额度和网络时运行 `start --force-check`。
 
-## Commands
+## 常用命令
 
-List all models and their constraints without using a Kie key:
+查看实时模型目录：
 
 ```bash
 ./scripts/h_run.sh catalog
 ```
 
-Batch images:
+批量图片：
 
 ```bash
-./scripts/h_run.sh process-images "/path/to/root" \
+./scripts/h_run.sh process-images "/path/to/root" --workers 0 \
   --image-model 1 --image-resolution 1 --aspect-ratio 2 \
-  --reverse-model 1 \
-  --image-reverse-meta-prompt "Reverse this product image for Kie. PID: {pid}"
+  --reverse-model 1 --image-reverse-meta-prompt "将每张产品图反推为详细 Kie 图片提示词。PID：{pid}"
 ```
 
-Batch videos:
+批量视频：
 
 ```bash
-./scripts/h_run.sh generate-videos "/path/to/root" \
+./scripts/h_run.sh generate-videos "/path/to/root" --workers 0 \
   --video-model 3 --video-resolution 720p --aspect-ratio 2 \
-  --reverse-model 1 \
-  --video-reverse-meta-prompt "Reverse this processed image into a Kie video prompt. PID: {pid}"
+  --reverse-model 1 --video-reverse-meta-prompt "将处理后的产品图反推为详细 Kie 视频提示词。PID：{pid}"
 ```
 
-Single call:
+单次多图参考：
 
 ```bash
-./scripts/h_run.sh single --kind image --model 1 --prompt "Product lookbook photo" \
-  --media "/path/to/front.png" --media "/path/to/back.png" --media "/path/to/detail.png"
+./scripts/h_run.sh single --kind image --model 1 --prompt "男装商品 Lookbook" \
+  --media "/path/front.png" --media "/path/back.png" --media "/path/detail.png"
 ```
 
-Each repeated `--media` is another reference image for the same generation task. H preserves their order and validates the selected Kie model before submission:
+零张参考图自动走文生图；一张或多张共同进入同一个参考图任务。批处理中的不同 PID 始终是独立任务，并在整个根目录范围并发。
 
-| Image model | Reference images per single generation |
-| --- | ---: |
-| GPT Image-2 | 0-16 |
-| Nano Banana | 0-10 |
-| Nano Banana Pro | 0-8 |
-| Nano Banana 2 | 0-14 |
-| Nano Banana 2 Lite | 0-10 |
-| Seedream 5.0 Lite | 0-14 |
+## 输出
 
-Zero reference images routes to text-to-image. One or more routes to reference-image generation. In batch mode, source images remain separate concurrent jobs; use single mode only when multiple references should jointly produce one result.
+批处理：`<home>/Desktop/H返回结果_<输入目录名>/`
 
-Resume an already submitted task without paying for a duplicate submission:
+单处理：`<home>/Desktop/H返回结果_单处理/`
 
-```bash
-./scripts/h_run.sh resume "/path/to/task-record.json"
-```
-
-## Output
-
-Batch results:
+两者内部固定创建：
 
 ```text
-<home>/Desktop/H返回结果_<input-name>/
-  文本/
-  图像/
-  视频/
+文本/
+图像/
+视频/
 ```
 
-Single results:
+H 会立即保存每个已提交任务的 `task_id`。重跑时复用有效缓存、继续查询未完成任务，只重试失败项，避免重复扣费。图片和视频下载后都会校验真实文件头，防止把 PNG 或上传参考地址误存成 `.mp4`。
 
-```text
-<home>/Desktop/H返回结果_单处理/
-  文本/
-  图像/
-  视频/
-```
+## 安全
 
-Every submitted item records its `task_id` immediately. Reruns reuse valid prompt caches, resume pending tasks, and only regenerate when the source or request parameters changed. Batch exit code `2` means partial failure; the JSON summary contains exact PID-level causes and next actions.
-
-## Security
-
-- TLS certificate verification remains enabled.
-- Downloaded images and videos are checked by file signature before being accepted.
-- Keys are logged only as short SHA-256 fingerprints.
-- Rotate any key that was ever pasted into a public repository or shared transcript.
+- TLS 证书校验始终开启。
+- API Key 只允许保存在用户环境或用户 secrets 目录。
+- 日志不输出完整 Key。
+- 曾经粘贴到公开仓库或公开记录中的 Key 应立即轮换。

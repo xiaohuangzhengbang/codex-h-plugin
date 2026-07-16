@@ -2745,5 +2745,11 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
     except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print_json(
+            {
+                "ready": False,
+                "error_category": exception_category(exc),
+                "error": str(exc),
+            }
+        )
         raise SystemExit(1)

@@ -9,6 +9,9 @@ permissions:
 
 jobs:
   test:
+    env:
+      CODEX_HOME: ${{ runner.temp }}/h-codex-home
+      H_CI_BOOTSTRAP_TEST: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -26,15 +29,19 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Exercise first-use bootstrap
-        run: python scripts/h_run.py bootstrap
+        run: python scripts/test_h_bootstrap_integration.py
+      - name: Exercise fixed protocol
+        run: python scripts/h_run.py protocol batch-image
       - name: Exercise Windows launcher
         if: runner.os == 'Windows'
-        run: scripts\h_run.cmd catalog
+        run: scripts\h_run.cmd start --offline
       - name: Exercise macOS launcher
         if: runner.os == 'macOS'
-        run: ./scripts/h_run.sh catalog
+        run: ./scripts/h_run.sh start --offline
       - name: Run regression tests
-        run: python scripts/test_kie_result_url.py
+        run: |
+          python scripts/test_h_launcher.py
+          python scripts/test_kie_result_url.py
       - name: Validate Python syntax
         run: python -m compileall -q scripts
       - name: Validate catalog without a Kie key
