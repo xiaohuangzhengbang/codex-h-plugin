@@ -13,7 +13,7 @@ H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理�
 2. 每个新任务第一次响应用户之前，必须先运行 H 启动器的 `start` 命令。
 3. 读取命令输出中的最后一个 JSON，只逐字显示 `display_text`。不得把启动日志、JSON 或额外说明发给用户。
 4. 后续需要菜单时，必须运行 `protocol <state>`，继续逐字显示返回的 `display_text`。
-5. 不得直接运行 `kie_video_batch.py`，不得手动寻找或安装 `requests`，不得让用户先装 Python。启动器负责扫描、安装和修复。
+5. 不得直接运行 `kie_video_batch.py`，不得手动寻找或安装 Python、pip 或 `requests`。便携包必须使用内置运行程序；源码版启动器只作为开发回退。
 6. `start` 返回 `key-required` 或 `setup-error` 时，只显示 `display_text`，不得提交任何 Kie 生成任务。
 
 从本 `SKILL.md` 定位插件根目录，再从根目录运行对应启动器：
@@ -27,7 +27,7 @@ H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理�
 <launcher> start
 ```
 
-启动器会优先使用 Codex 自带 Python，第一次调用时扫描依赖，在 `<home>/.codex/cache/h` 创建可复用隔离环境，并自动安装缺失项。之后只做快速完整性检查；插件版本或依赖变化时自动重建。不得把虚拟环境建在插件目录。
+正式便携包中的启动器必须优先运行插件 `runtime/` 内的 `h_launcher` 和 `h_core`，它们已包含运行环境，不得下载 Python。只有源码开发版不存在内置程序时，启动器才允许扫描 Codex/系统 Python，并在 `<home>/.codex/cache/h` 创建隔离环境。
 
 ## 固定状态
 

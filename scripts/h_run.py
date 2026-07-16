@@ -7,6 +7,7 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -15,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+PLUGIN_ROOT = (
+    Path(sys.executable).resolve().parent.parent
+    if IS_FROZEN
+    else Path(__file__).resolve().parents[1]
+)
 REQUIREMENTS = PLUGIN_ROOT / "requirements.txt"
 MAIN_SCRIPT = PLUGIN_ROOT / "scripts" / "kie_video_batch.py"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
@@ -55,6 +61,18 @@ DEPENDENCY_MARKER = VENV_DIR / ".h-requirements.sha256"
 LOCK_FILE = CACHE_ROOT / "bootstrap.lock"
 
 
+def packaged_core_path() -> Path | None:
+    executable_name = "h_core.exe" if os.name == "nt" else "h_core"
+    candidates = []
+    if IS_FROZEN:
+        candidates.append(Path(sys.executable).resolve().parent / executable_name)
+    candidates.append(PLUGIN_ROOT / "runtime" / executable_name)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class BootstrapReport:
     python: str
@@ -76,10 +94,13 @@ def run_quiet(
     *,
     cwd: Path | None = None,
     timeout: int = 600,
+    env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    if env_overrides:
+        env.update(env_overrides)
     try:
         return subprocess.run(
             command,
@@ -227,6 +248,16 @@ def ensure_dependencies(python: Path) -> tuple[bool, list[str], bool]:
 
 
 def bootstrap() -> BootstrapReport:
+    packaged_core = packaged_core_path()
+    if packaged_core:
+        return BootstrapReport(
+            python=str(packaged_core),
+            environment_created=False,
+            dependencies_installed=False,
+            missing_before=[],
+            marker_was_current=True,
+            runtime_source="packaged-executable",
+        )
     ensure_python_version()
     with BootstrapLock():
         python, environment_created = ensure_venv()
@@ -346,23 +377,32 @@ def local_checks(report: BootstrapReport, *, offline: bool, forwarded_args: list
     sources = key_sources()
     if "--api-key" in forwarded_args:
         sources = ["--api-key", *sources]
+    packaged = report.runtime_source == "packaged-executable"
+    runtime_path = Path(report.python)
     return {
         "python_version": ".".join(str(value) for value in sys.version_info[:3]),
         "python_supported": sys.version_info >= MIN_PYTHON,
         "requirements": REQUIREMENTS.exists(),
-        "dependencies": dependencies_ready(Path(report.python)),
-        "main_script": MAIN_SCRIPT.exists(),
+        "dependencies": runtime_path.is_file() if packaged else dependencies_ready(runtime_path),
+        "main_script": runtime_path.is_file() if packaged else MAIN_SCRIPT.exists(),
         "desktop": str(desktop_dir()),
         "desktop_writable": desktop_writable(),
         "kie_key_sources": sources,
-        "runtime": str(VENV_DIR),
+        "runtime": report.python if packaged else str(VENV_DIR),
+        "portable": packaged,
         "offline": offline,
     }
 
 
-def run_api_doctor(python: Path, forwarded_args: list[str]) -> tuple[int, dict[str, object], str]:
+def core_command(report: BootstrapReport, arguments: list[str]) -> list[str]:
+    if report.runtime_source == "packaged-executable":
+        return [report.python, *arguments]
+    return [report.python, str(MAIN_SCRIPT), *arguments]
+
+
+def run_api_doctor(report: BootstrapReport, forwarded_args: list[str]) -> tuple[int, dict[str, object], str]:
     result = run_quiet(
-        [str(python), str(MAIN_SCRIPT), "doctor", *forwarded_args],
+        core_command(report, ["doctor", *forwarded_args]),
         cwd=PLUGIN_ROOT,
         timeout=60,
     )
@@ -380,7 +420,7 @@ def doctor(*, offline: bool = False, forwarded_args: list[str] | None = None) ->
     ) and (bool(sources) or offline)
     api_ready = offline
     if local_ready and not offline:
-        code, api_result, raw_output = run_api_doctor(Path(report.python), forwarded_args)
+        code, api_result, raw_output = run_api_doctor(report, forwarded_args)
         checks["kie_api"] = api_result or {"ready": False, "message": raw_output[-1000:]}
         api_ready = code == 0 and bool(api_result.get("ready"))
     ready = local_ready and api_ready
@@ -390,8 +430,8 @@ def doctor(*, offline: bool = False, forwarded_args: list[str] | None = None) ->
     return 0 if ready else 1
 
 
-def model_catalog(python: Path) -> dict[str, Any]:
-    result = run_quiet([str(python), str(MAIN_SCRIPT), "catalog"], cwd=PLUGIN_ROOT, timeout=60)
+def model_catalog(report: BootstrapReport) -> dict[str, Any]:
+    result = run_quiet(core_command(report, ["catalog"]), cwd=PLUGIN_ROOT, timeout=60)
     catalog = parse_last_json(result.stdout)
     if result.returncode != 0 or not catalog:
         raise RuntimeError("H could not read its model catalog:\n" + result.stdout[-1000:])
@@ -475,7 +515,7 @@ def protocol(state: str) -> int:
     catalog: dict[str, Any] = {}
     normalized = state.strip().lower().replace("_", "-")
     if normalized not in {"mode", "batch-root", "single-kind", "post-images", "post-videos", "post-single"}:
-        catalog = model_catalog(Path(report.python))
+        catalog = model_catalog(report)
     print_json(
         {
             "ready": True,
@@ -489,6 +529,8 @@ def protocol(state: str) -> int:
 
 
 def setup_status(report: BootstrapReport) -> str:
+    if report.runtime_source == "packaged-executable":
+        return "内置运行环境已就绪，无需安装 Python。"
     if report.environment_created or report.dependencies_installed:
         return "首次环境准备完成，缺失依赖已自动安装。"
     return "环境检查通过，H 已准备好。"
@@ -553,7 +595,7 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
             }
         )
         return 0
-    code, api_result, raw_output = run_api_doctor(Path(report.python), forwarded_args)
+    code, api_result, raw_output = run_api_doctor(report, forwarded_args)
     checks["kie_api"] = api_result or {"ready": False, "message": raw_output[-1000:]}
     if code == 0 and api_result.get("ready"):
         write_ready(report, checks)
@@ -588,6 +630,136 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
     return 0
 
 
+def install_home() -> Path:
+    override = os.environ.get("H_INSTALL_HOME", "").strip()
+    return Path(override).expanduser().resolve() if override else Path.home().resolve()
+
+
+def merge_personal_marketplace(path: Path) -> None:
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Personal marketplace JSON is invalid: {path}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Personal marketplace must contain a JSON object: {path}")
+    else:
+        data = {}
+    data.setdefault("name", "personal")
+    interface = data.setdefault("interface", {})
+    if not isinstance(interface, dict):
+        interface = {}
+        data["interface"] = interface
+    interface.setdefault("displayName", "Personal")
+    plugins = data.get("plugins", [])
+    if not isinstance(plugins, list):
+        raise RuntimeError(f"Personal marketplace plugins must be a list: {path}")
+    entry = {
+        "name": "h",
+        "source": {"source": "local", "path": "./plugins/h"},
+        "policy": {"installation": "INSTALLED_BY_DEFAULT", "authentication": "ON_USE"},
+        "category": "Productivity",
+    }
+    merged: list[object] = []
+    replaced = False
+    for plugin in plugins:
+        if isinstance(plugin, dict) and plugin.get("name") == "h":
+            if not replaced:
+                merged.append(entry)
+                replaced = True
+            continue
+        merged.append(plugin)
+    if not replaced:
+        merged.append(entry)
+    data["plugins"] = merged
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_name(f"marketplace.backup-{int(time.time())}.json")
+        shutil.copy2(path, backup)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def install_local() -> int:
+    packaged_core = packaged_core_path()
+    if not packaged_core:
+        raise RuntimeError("This package does not contain the portable H runtime.")
+    source = PLUGIN_ROOT.resolve()
+    home = install_home()
+    marketplace_root = home / ".agents" / "plugins"
+    target = marketplace_root / "plugins" / "h"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup: Path | None = None
+    if source != target.resolve():
+        staging = target.parent / f".h.installing-{os.getpid()}-{int(time.time())}"
+        ignore = shutil.ignore_patterns(
+            ".git",
+            ".github",
+            ".agents",
+            ".h_api_key",
+            ".h_ready.json",
+            ".h_venv",
+            ".ruff_cache",
+            "__pycache__",
+            "*.pyc",
+            "build",
+            "dist",
+            "portable-dist",
+        )
+        preserved_key = (target / ".h_api_key").read_bytes() if (target / ".h_api_key").is_file() else None
+        shutil.copytree(source, staging, ignore=ignore)
+        if preserved_key:
+            (staging / ".h_api_key").write_bytes(preserved_key)
+        if target.exists():
+            backup = target.parent / f"h.backup-{int(time.time())}-{os.getpid()}"
+            target.rename(backup)
+        staging.rename(target)
+    runtime_dir = target / "runtime"
+    launcher_name = "h_launcher.exe" if os.name == "nt" else "h_launcher"
+    core_name = "h_core.exe" if os.name == "nt" else "h_core"
+    installed_launcher = runtime_dir / launcher_name
+    installed_core = runtime_dir / core_name
+    if not installed_launcher.is_file() or not installed_core.is_file():
+        raise RuntimeError("The copied H package is missing its portable runtime files.")
+    if os.name != "nt":
+        installed_launcher.chmod(installed_launcher.stat().st_mode | 0o111)
+        installed_core.chmod(installed_core.stat().st_mode | 0o111)
+        if sys.platform == "darwin":
+            run_quiet(["xattr", "-dr", "com.apple.quarantine", str(target)], timeout=30)
+    environment = {"CODEX_HOME": str(home / ".codex")} if os.environ.get("H_INSTALL_HOME") else None
+    smoke = run_quiet(
+        [str(installed_launcher), "start", "--offline"],
+        cwd=target,
+        timeout=300,
+        env_overrides=environment,
+    )
+    smoke_payload = parse_last_json(smoke.stdout)
+    if smoke.returncode != 0 or not smoke_payload.get("ready"):
+        if backup and target.exists():
+            failed = target.parent / f"h.failed-{int(time.time())}-{os.getpid()}"
+            target.rename(failed)
+            backup.rename(target)
+        raise RuntimeError("The installed H portable runtime did not pass its offline startup check.")
+    marketplace_path = marketplace_root / "marketplace.json"
+    merge_personal_marketplace(marketplace_path)
+    print_json(
+        {
+            "ready": True,
+            "state": "installed",
+            "plugin_path": str(target),
+            "marketplace_path": str(marketplace_path),
+            "backup_path": str(backup) if backup else "",
+            "portable_runtime": True,
+            "display_text": (
+                "H 安装完成，内置运行环境已通过检查，不需要安装 Python。\n"
+                "请完全退出并重新打开 Codex，然后新建任务调用 H。"
+            ),
+        }
+    )
+    return 0
+
+
 def set_key() -> int:
     value = getpass.getpass("Kie API key: ").strip().lstrip("\ufeff")
     value = "".join(ch for ch in value if ch.isprintable() and not ch.isspace())
@@ -617,6 +789,8 @@ def main(argv: list[str]) -> int:
     configure_utf8_output()
     command = argv[0] if argv else "start"
     try:
+        if command == "install-local":
+            return install_local()
         if command == "set-key":
             return set_key()
         if command in {"bootstrap", "--bootstrap"}:
@@ -636,7 +810,7 @@ def main(argv: list[str]) -> int:
                 raise ValueError("Usage: h_run protocol <state>")
             return protocol(argv[1])
         report = bootstrap()
-        return subprocess.call([report.python, str(MAIN_SCRIPT), *argv], cwd=str(PLUGIN_ROOT))
+        return subprocess.call(core_command(report, argv), cwd=str(PLUGIN_ROOT))
     except Exception as exc:
         if command in {"start", "protocol"}:
             print_json(startup_failure(exc))

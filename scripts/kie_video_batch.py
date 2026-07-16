@@ -31,7 +31,11 @@ KIE_FILE_HOST = "https://kieai.redpandaai.co"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = (
+    Path(sys.executable).resolve().parent.parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parents[1]
+)
 LOCAL_API_KEY_FILE = PLUGIN_ROOT / ".h_api_key"
 USER_API_KEY_FILE = Path.home() / ".codex" / "secrets" / "h_kie_api_key.txt"
 _PROXY_CACHE: dict[str, str] | None = None

@@ -5,28 +5,29 @@ H 是只使用 Kie 的 Codex 插件，所有电脑统一为两个模式：
 1. 批处理：递归扫描整个根目录，把所有 PID 图片一次性放进同一个并发池。
 2. 单处理：只调用一次所选的 Kie 文本、图像、视频、放大或延长模型。
 
-## 从 GitHub 安装
+## 安装方式
 
-在 Codex 中把下面仓库添加为插件 marketplace，然后安装或启用 `h`：
+把 GitHub 仓库链接直接发给 Codex，不等于安装插件。最终用户应使用 Releases 中与电脑匹配的便携 ZIP：
 
-```text
-https://github.com/xiaohuangzhengbang/codex-h-plugin.git
-```
+- `H-Codex-Plugin-Windows-x64.zip`
+- `H-Codex-Plugin-macOS-Intel.zip`
+- `H-Codex-Plugin-macOS-Apple-Silicon.zip`
 
-仓库根目录已经包含 `.agents/plugins/marketplace.json` 和 `.codex-plugin/plugin.json`。安装后直接调用 H，不需要先运行安装命令。
+完整解压后，Windows 运行 `Install-H-Windows.cmd`，Mac 运行 `Install-H.command`。也可以把整个解压文件夹交给 Codex，让它运行对应安装文件。不能只给 GitHub 链接。
 
-## 首次自动准备
+安装包已经内置 H 运行程序、Python 解释器和 `requests`，目标电脑不需要 Python、pip、Homebrew、Git 或 Codex CLI。安装器会：
 
-第一次调用 H 时，插件会自动完成：
+1. 把 H 安装到 `<home>/.agents/plugins/plugins/h`。
+2. 合并个人 marketplace，不覆盖其他个人插件。
+3. 将 H 标记为默认安装。
+4. 使用内置运行程序完成离线启动验证。
+5. 提示完全退出并重新打开 Codex，再新建任务调用 H。
 
-1. 识别 Windows、Intel Mac 或 Apple Silicon Mac。
-2. 优先寻找 Codex Desktop 自带 Python 3.10+。
-3. 找不到时尝试系统 Python；Windows 最后使用 `winget` 自动安装用户级 Python 3.12，Mac 在已有 Homebrew 时自动安装 `python@3.12`。
-4. 在 `<home>/.codex/cache/h` 创建独立可复用环境。
-5. 扫描 `requirements.txt` 和实际 import，自动安装或修复缺失依赖。
-6. 检查桌面写入权限；有 Kie Key 时验证一次接口并缓存 ready 状态。
+GitHub 仓库只用于源代码和发布包构建，不再作为聊天中的直接安装入口。
 
-插件更新或依赖变化时会自动建立新环境。平时启动只做快速检查，不会每次重装或长时间验证。
+## 源码开发回退
+
+源码版本仍保留 Python 自动发现与依赖安装，方便开发测试；最终用户便携包始终优先使用内置程序，不进入 Python 下载流程。
 
 Windows 手动检查入口：
 

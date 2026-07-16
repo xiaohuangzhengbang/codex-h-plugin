@@ -4,6 +4,12 @@ export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PORTABLE_LAUNCHER="$SCRIPT_DIR/../runtime/h_launcher"
+
+if [ -f "$PORTABLE_LAUNCHER" ]; then
+  chmod +x "$PORTABLE_LAUNCHER"
+  exec "$PORTABLE_LAUNCHER" "$@"
+fi
 
 python_supported() {
   "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1

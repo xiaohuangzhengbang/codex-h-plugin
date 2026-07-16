@@ -1,8 +1,12 @@
 import importlib.util
 import io
+import json
+import os
 import sys
-from pathlib import Path
+import tempfile
 from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -111,6 +115,89 @@ def test_empty_or_bom_only_keys_are_not_detected():
     assert launcher.secret_present("valid-key-value")
 
 
+def test_packaged_runtime_skips_python_command_shape():
+    launcher = load_launcher()
+    report = launcher.BootstrapReport(
+        python="/package/runtime/h_core",
+        environment_created=False,
+        dependencies_installed=False,
+        missing_before=[],
+        marker_was_current=True,
+        runtime_source="packaged-executable",
+    )
+    assert launcher.core_command(report, ["catalog"]) == ["/package/runtime/h_core", "catalog"]
+    assert launcher.setup_status(report) == "内置运行环境已就绪，无需安装 Python。"
+
+
+def test_local_installer_merges_marketplace_and_preserves_other_plugins():
+    launcher = load_launcher()
+    launcher_name = "h_launcher.exe" if os.name == "nt" else "h_launcher"
+    core_name = "h_core.exe" if os.name == "nt" else "h_core"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        source = root / "source"
+        home = root / "home"
+        (source / ".codex-plugin").mkdir(parents=True)
+        (source / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "h", "version": "0.2.0+codex.test"}),
+            encoding="utf-8",
+        )
+        (source / "runtime").mkdir()
+        (source / "runtime" / launcher_name).write_bytes(b"launcher")
+        (source / "runtime" / core_name).write_bytes(b"core")
+        (source / "requirements.txt").write_text("requests\n", encoding="utf-8")
+        marketplace = home / ".agents" / "plugins" / "marketplace.json"
+        marketplace.parent.mkdir(parents=True)
+        marketplace.write_text(
+            json.dumps(
+                {
+                    "name": "personal",
+                    "interface": {"displayName": "Personal"},
+                    "plugins": [
+                        {"name": "kie", "source": {"source": "local", "path": "./plugins/kie"}},
+                        {"name": "h", "source": {"source": "local", "path": "old"}},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        originals = {
+            "PLUGIN_ROOT": launcher.PLUGIN_ROOT,
+            "packaged_core_path": launcher.packaged_core_path,
+            "run_quiet": launcher.run_quiet,
+        }
+        old_home = os.environ.get("H_INSTALL_HOME")
+        launcher.PLUGIN_ROOT = source
+        launcher.packaged_core_path = lambda: source / "runtime" / core_name
+        launcher.run_quiet = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"ready": True}),
+        )
+        os.environ["H_INSTALL_HOME"] = str(home)
+        try:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                assert launcher.install_local() == 0
+        finally:
+            launcher.PLUGIN_ROOT = originals["PLUGIN_ROOT"]
+            launcher.packaged_core_path = originals["packaged_core_path"]
+            launcher.run_quiet = originals["run_quiet"]
+            if old_home is None:
+                os.environ.pop("H_INSTALL_HOME", None)
+            else:
+                os.environ["H_INSTALL_HOME"] = old_home
+        payload = launcher.parse_last_json(output.getvalue())
+        assert payload["ready"] is True
+        assert payload["portable_runtime"] is True
+        target = home / ".agents" / "plugins" / "plugins" / "h"
+        assert (target / "runtime" / launcher_name).is_file()
+        installed_marketplace = json.loads(marketplace.read_text(encoding="utf-8"))
+        assert [plugin["name"] for plugin in installed_marketplace["plugins"]] == ["kie", "h"]
+        h_entry = installed_marketplace["plugins"][1]
+        assert h_entry["source"]["path"] == "./plugins/h"
+        assert h_entry["policy"]["installation"] == "INSTALLED_BY_DEFAULT"
+
+
 def test_start_attributes_api_failure_without_submitting_work():
     launcher = load_launcher()
     report = launcher.BootstrapReport(
@@ -176,7 +263,7 @@ def test_user_facing_files_are_valid_utf8_chinese():
 
     assert "哈喽小杨，你又开始工作啦，想不想小黄啊？" in launcher_source
     assert "H 固定控制器" in skill
-    assert "首次自动准备" in readme
+    assert "安装方式" in readme
     assert "�" not in launcher_source + skill + readme
 
 
