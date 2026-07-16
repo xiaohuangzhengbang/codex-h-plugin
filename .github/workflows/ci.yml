@@ -10,7 +10,7 @@ permissions:
 jobs:
   test:
     env:
-      CODEX_HOME: ${{ runner.temp }}/h-codex-home
+      CODEX_HOME: ${{ github.workspace }}/.h-ci-codex-home
       H_CI_BOOTSTRAP_TEST: "1"
     strategy:
       fail-fast: false
