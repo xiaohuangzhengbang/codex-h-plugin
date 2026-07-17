@@ -42,6 +42,24 @@ function Test-HRuntime {
         (Test-Path -LiteralPath $RuntimeCore -PathType Leaf)
 }
 
+function Get-HFileSha256 {
+    param([string]$Path)
+    $Stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $Hasher = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $Bytes = $Hasher.ComputeHash($Stream)
+            return [System.BitConverter]::ToString($Bytes).Replace("-", "").ToLowerInvariant()
+        }
+        finally {
+            $Hasher.Dispose()
+        }
+    }
+    finally {
+        $Stream.Dispose()
+    }
+}
+
 function Start-H {
     param(
         [string]$Executable,
@@ -96,7 +114,7 @@ function Install-HGithubRuntime {
         else {
             $env:H_RUNTIME_PACKAGE_SHA256.Trim().ToLowerInvariant()
         }
-        $ActualHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        $ActualHash = Get-HFileSha256 -Path $Archive
         if ($ActualHash -ne $ExpectedHash) {
             throw "Downloaded H runtime failed SHA-256 verification."
         }

@@ -248,6 +248,8 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "codex-runtimes" in windows
     assert "github-runtime" in windows
     assert "Invoke-WebRequest" in windows
+    assert "System.Security.Cryptography.SHA256" in windows
+    assert "Get-FileHash" not in windows
     assert "H_FORCE_GITHUB_RUNTIME" in windows
     assert "H-Codex-Plugin-Windows-x64.zip" in windows
     assert "82a09fce5278714f8e968b2c92a907d00d0600d8235cb5f45444862f6b12c10e" in windows
