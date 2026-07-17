@@ -38,6 +38,9 @@ jobs:
       - name: Exercise macOS launcher
         if: runner.os == 'macOS'
         run: ./scripts/h_run.sh start --offline
+      - name: Validate macOS launcher syntax
+        if: runner.os == 'macOS'
+        run: sh -n scripts/h_run.sh
       - name: Run regression tests
         run: |
           python scripts/test_h_launcher.py
@@ -49,7 +52,7 @@ jobs:
       - name: Reject committed secrets
         shell: bash
         run: |
-          if git grep -n -I -E '(sk-[A-Za-z0-9]{16,}|[a-f0-9]{32})' -- . ':!assets/*'; then
+          if git grep -n -I -E '(sk-[A-Za-z0-9]{16,}|(^|[^a-f0-9])[a-f0-9]{32}([^a-f0-9]|$))' -- . ':!assets/*'; then
             echo "Potential API key committed"
             exit 1
           fi

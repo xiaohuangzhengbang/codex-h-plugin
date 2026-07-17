@@ -246,14 +246,53 @@ def test_cross_platform_bootstrap_sources_are_present():
 
     assert all(ord(character) < 128 for character in windows)
     assert "codex-runtimes" in windows
+    assert "github-runtime" in windows
+    assert "Invoke-WebRequest" in windows
+    assert "H_FORCE_GITHUB_RUNTIME" in windows
+    assert "H-Codex-Plugin-Windows-x64.zip" in windows
+    assert "82a09fce5278714f8e968b2c92a907d00d0600d8235cb5f45444862f6b12c10e" in windows
     assert "Python.Python.3.12" in windows
     assert "winget.exe" in windows
     assert "powershell.exe" in command
 
     assert "codex-runtimes" in shell
+    assert "github-runtime" in shell
+    assert "H_FORCE_GITHUB_RUNTIME" in shell
+    assert "H-Codex-Plugin-macOS-Apple-Silicon.zip" in shell
+    assert "H-Codex-Plugin-macOS-Intel.zip" in shell
+    assert "1681496aca685912a8728284f956bdd292121cce77e00302b92dbe8981c489ea" in shell
+    assert "ce4e0fb9e5da5964946b3a8d3d5c95797c19d62819fa4fa669c75dfb1efd74e1" in shell
+    assert "curl -fL --retry 3" in shell
+    assert "shasum -a 256" in shell
     assert "/opt/homebrew/bin/brew" in shell
     assert "/usr/local/bin/brew" in shell
     assert "python@3.12" in shell
+
+
+def test_github_marketplace_install_contract():
+    marketplace = json.loads(
+        (PLUGIN_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    entry = next(item for item in marketplace["plugins"] if item["name"] == "h")
+    assert marketplace["name"] == "codex-h-plugin"
+    assert entry["source"] == {
+        "source": "url",
+        "url": "https://github.com/xiaohuangzhengbang/codex-h-plugin.git",
+        "ref": "main",
+    }
+    assert entry["policy"]["installation"] == "INSTALLED_BY_DEFAULT"
+    assert entry["policy"]["authentication"] == "ON_USE"
+
+    agents = (PLUGIN_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    install = (PLUGIN_ROOT / "INSTALL.md").read_text(encoding="utf-8")
+    for document in (agents, install):
+        assert (
+            "plugin marketplace add https://github.com/xiaohuangzhengbang/codex-h-plugin.git --ref main"
+            in document
+        )
+        assert "plugin add h@codex-h-plugin" in document
+    assert "Do not redirect the user to a ZIP package" in agents
+    assert "WindowsApps" in agents
 
 
 def test_user_facing_files_are_valid_utf8_chinese():
@@ -263,7 +302,7 @@ def test_user_facing_files_are_valid_utf8_chinese():
 
     assert "哈喽小杨，你又开始工作啦，想不想小黄啊？" in launcher_source
     assert "H 固定控制器" in skill
-    assert "安装方式" in readme
+    assert "从 GitHub 安装" in readme
     assert "�" not in launcher_source + skill + readme
 
 

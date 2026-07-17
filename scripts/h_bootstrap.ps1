@@ -1,8 +1,24 @@
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 $ForwardedArgs = $args
 $Launcher = Join-Path $PSScriptRoot "h_run.py"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+
+$CodexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+    Join-Path $HOME ".codex"
+}
+else {
+    $env:CODEX_HOME
+}
+$RuntimeId = "portable-20260716153153"
+$RuntimeRoot = Join-Path $CodexHome "cache\h\github-runtime\$RuntimeId"
+$RuntimeLauncher = Join-Path $RuntimeRoot "runtime\h_launcher.exe"
+$RuntimeCore = Join-Path $RuntimeRoot "runtime\h_core.exe"
+$RuntimeAsset = "H-Codex-Plugin-Windows-x64.zip"
+$RuntimePackageRoot = "H-Codex-Plugin-Windows-x64"
+$RuntimeUrl = "https://github.com/xiaohuangzhengbang/codex-h-plugin/releases/download/v0.2.0-portable.20260716153153/$RuntimeAsset"
+$RuntimeSha256 = "82a09fce5278714f8e968b2c92a907d00d0600d8235cb5f45444862f6b12c10e"
 
 function Test-HPython {
     param(
@@ -21,6 +37,11 @@ function Test-HPython {
     }
 }
 
+function Test-HRuntime {
+    return (Test-Path -LiteralPath $RuntimeLauncher -PathType Leaf) -and
+        (Test-Path -LiteralPath $RuntimeCore -PathType Leaf)
+}
+
 function Start-H {
     param(
         [string]$Executable,
@@ -30,6 +51,105 @@ function Start-H {
     $env:H_BOOTSTRAP_PYTHON_SOURCE = $Source
     & $Executable @Prefix $Launcher @ForwardedArgs
     exit $LASTEXITCODE
+}
+
+function Start-HRuntime {
+    param([string]$Source)
+    $env:H_BOOTSTRAP_PYTHON_SOURCE = $Source
+    & $RuntimeLauncher @ForwardedArgs
+    exit $LASTEXITCODE
+}
+
+function Install-HGithubRuntime {
+    if (Test-HRuntime) {
+        return
+    }
+
+    $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "h-github-runtime-$PID-$(Get-Random)"
+    $Archive = Join-Path $TempRoot $RuntimeAsset
+    $ExtractRoot = Join-Path $TempRoot "extracted"
+    $StagingRoot = "$RuntimeRoot.installing-$PID"
+    New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
+
+    try {
+        $PackageOverride = $env:H_RUNTIME_PACKAGE_PATH
+        if (-not [string]::IsNullOrWhiteSpace($PackageOverride)) {
+            if (-not (Test-Path -LiteralPath $PackageOverride -PathType Leaf)) {
+                throw "H_RUNTIME_PACKAGE_PATH does not point to a file."
+            }
+            Copy-Item -LiteralPath $PackageOverride -Destination $Archive -Force
+        }
+        else {
+            $DownloadUrl = if ([string]::IsNullOrWhiteSpace($env:H_RUNTIME_PACKAGE_URL)) {
+                $RuntimeUrl
+            }
+            else {
+                $env:H_RUNTIME_PACKAGE_URL
+            }
+            Write-Output "H bootstrap: downloading the verified Windows runtime from GitHub..."
+            Invoke-WebRequest -UseBasicParsing -Uri $DownloadUrl -OutFile $Archive -Headers @{ "User-Agent" = "H-Codex-Plugin" }
+        }
+
+        $ExpectedHash = if ([string]::IsNullOrWhiteSpace($env:H_RUNTIME_PACKAGE_SHA256)) {
+            $RuntimeSha256
+        }
+        else {
+            $env:H_RUNTIME_PACKAGE_SHA256.Trim().ToLowerInvariant()
+        }
+        $ActualHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($ActualHash -ne $ExpectedHash) {
+            throw "Downloaded H runtime failed SHA-256 verification."
+        }
+
+        New-Item -ItemType Directory -Path $ExtractRoot -Force | Out-Null
+        Expand-Archive -LiteralPath $Archive -DestinationPath $ExtractRoot -Force
+        $Payload = Join-Path $ExtractRoot "$RuntimePackageRoot\payload"
+        if (-not (Test-Path -LiteralPath (Join-Path $Payload "runtime\h_launcher.exe") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $Payload "runtime\h_core.exe") -PathType Leaf)) {
+            throw "Downloaded H runtime archive is missing its executables."
+        }
+
+        New-Item -ItemType Directory -Path (Split-Path -Parent $RuntimeRoot) -Force | Out-Null
+        if (Test-Path -LiteralPath $StagingRoot) {
+            Remove-Item -LiteralPath $StagingRoot -Recurse -Force
+        }
+        Move-Item -LiteralPath $Payload -Destination $StagingRoot
+
+        if (-not (Test-HRuntime)) {
+            if (Test-Path -LiteralPath $RuntimeRoot) {
+                Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force
+            }
+            try {
+                Move-Item -LiteralPath $StagingRoot -Destination $RuntimeRoot
+            }
+            catch {
+                if (-not (Test-HRuntime)) {
+                    throw
+                }
+            }
+        }
+
+        if (-not (Test-HRuntime)) {
+            throw "H runtime installation did not complete."
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $StagingRoot) {
+            Remove-Item -LiteralPath $StagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $TempRoot) {
+            Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+if (Test-HRuntime) {
+    Start-HRuntime -Source "github-runtime-cache"
+}
+
+if ($env:H_FORCE_GITHUB_RUNTIME -eq "1") {
+    Install-HGithubRuntime
+    Start-HRuntime -Source "github-runtime-download"
 }
 
 $BundledCandidates = @(
@@ -43,9 +163,9 @@ foreach ($Candidate in $BundledCandidates) {
     }
 }
 
-$RuntimeRoot = Join-Path $HOME ".cache\codex-runtimes"
-if (Test-Path -LiteralPath $RuntimeRoot) {
-    $Discovered = Get-ChildItem -LiteralPath $RuntimeRoot -Filter "python.exe" -File -Recurse -ErrorAction SilentlyContinue |
+$RuntimeSearchRoot = Join-Path $HOME ".cache\codex-runtimes"
+if (Test-Path -LiteralPath $RuntimeSearchRoot) {
+    $Discovered = Get-ChildItem -LiteralPath $RuntimeSearchRoot -Filter "python.exe" -File -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -match "[\\/]dependencies[\\/]python[\\/]" }
     foreach ($Item in $Discovered) {
         if (Test-HPython $Item.FullName) {
@@ -66,9 +186,19 @@ foreach ($Name in @("python.exe", "python3.exe")) {
     }
 }
 
+$RuntimeFailure = $null
+try {
+    Install-HGithubRuntime
+    Start-HRuntime -Source "github-runtime-download"
+}
+catch {
+    $RuntimeFailure = $_.Exception.Message
+    Write-Warning "H could not download its GitHub runtime; trying the operating-system fallback."
+}
+
 $Winget = Get-Command "winget.exe" -ErrorAction SilentlyContinue
 if ($Winget) {
-    Write-Output "H bootstrap: Python was not found; installing a private user-scoped Python runtime..."
+    Write-Output "H bootstrap: installing a private user-scoped Python runtime with winget..."
     & $Winget.Source install --id Python.Python.3.12 --exact --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
     $PythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
     if (Test-Path -LiteralPath $PythonRoot) {
@@ -82,5 +212,12 @@ if ($Winget) {
     }
 }
 
-Write-Error "H could not find the Codex Python runtime or automatically install Python 3.12. Repair Codex Desktop and invoke H again."
-exit 1
+$FailurePayload = @{
+    ready = $false
+    state = "setup-error"
+    error_category = "runtime"
+    display_text = "H could not prepare its runtime from GitHub. Check network access and invoke H again; no Kie task was submitted."
+    reason = $RuntimeFailure
+}
+$FailurePayload | ConvertTo-Json -Compress
+exit 0

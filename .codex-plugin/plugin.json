@@ -1,7 +1,7 @@
 {
   "name": "h",
-  "version": "0.2.0+codex.20260716153153",
-  "description": "Portable Kie-only batch and single workflow with an embedded runtime.",
+  "version": "0.2.0+codex.20260717012458",
+  "description": "GitHub-installed Kie-only batch and single workflow with automatic runtime setup.",
   "author": {
     "name": "XIAOH"
   },
@@ -16,8 +16,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "H",
-    "shortDescription": "Portable fixed Kie workflows with no Python installation.",
-    "longDescription": "H runs Kie-only workflows through one deterministic Chinese menu protocol with two modes: recursive whole-folder concurrent batch processing and one-model single processing. Platform-specific portable packages embed the runtime and dependencies, install through a local personal marketplace without requiring Python, pip, Homebrew, Git, or the Codex CLI, validate Kie before generation, save task IDs for safe resume, validate downloaded media, and write Desktop text, image, and video folders on Windows and Intel or Apple Silicon macOS.",
+    "shortDescription": "GitHub-installed fixed Kie workflows with automatic setup.",
+    "longDescription": "H installs from its GitHub marketplace and runs Kie-only workflows through one deterministic Chinese menu protocol with two modes: recursive whole-folder concurrent batch processing and one-model single processing. On first use it detects the platform and, when no suitable Python exists, downloads and verifies the matching Windows, Intel Mac, or Apple Silicon runtime from the same GitHub repository. It validates Kie before generation, saves task IDs for safe resume, validates downloaded media, and writes Desktop text, image, and video folders.",
     "developerName": "XIAOH",
     "category": "Productivity",
     "capabilities": [
