@@ -736,6 +736,8 @@ def test_catalog_lists_all_models_without_a_key_and_includes_follow_up_actions()
     }
     assert {item["model"] for item in catalog["video"]} >= {"grok-imagine/upscale", "grok-imagine/extend"}
     assert batch.next_actions("images")[0]["action"] == "继续生成视频"
+    assert batch.next_actions("videos")[0]["action"] == "发布本次生成的视频"
+    assert batch.next_actions("single-video")[0]["action"] == "发布本次生成的视频"
     assert "不重复提交" in batch.next_actions("single")[0]["action"]
 
 

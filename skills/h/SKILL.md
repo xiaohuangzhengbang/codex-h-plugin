@@ -1,11 +1,11 @@
 ---
 name: h
-description: "Kie-only fixed workflow for whole-folder concurrent batch processing and one-model single processing. Use for PID product folders, Kie reverse prompting, text or image generation, image or text to video, Grok transforms, and saved-task resume."
+description: "Unified H workflow for Kie text/image/video generation and AdsPower TikTok preview, scheduling, and publishing. Use for concurrent PID folder generation, one-model calls, generated-video publishing, standalone publishing, and saved-task resume."
 ---
 
 # H 固定控制器
 
-H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理。
+H 把生成和发布连成一条工作流：生成阶段只调用 Kie；发布阶段只调用本机 AdsPower Local API 与 TikTok Studio。
 
 ## 不可变规则
 
@@ -13,10 +13,11 @@ H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理�
 2. 每个新任务第一次响应用户之前，必须先运行 H 启动器的 `start` 命令。
 3. 读取命令输出中的最后一个 JSON，只逐字显示 `display_text`。不得把启动日志、JSON 或额外说明发给用户。
 4. 后续需要菜单时，必须运行 `protocol <state>`，继续逐字显示返回的 `display_text`。
-5. 不得直接运行 `kie_video_batch.py`，不得手动寻找或安装 Python、pip 或 `requests`。只运行平台启动器；启动器会优先复用现有环境，并在缺少环境时从 H 的 GitHub Release 自动下载、校验并缓存对应系统运行时。
-6. `start` 返回 `key-required` 或 `setup-error` 时，只显示 `display_text`，不得提交任何 Kie 生成任务。
+5. 不得直接运行 `kie_video_batch.py` 或 AdsPower 内部 Node 脚本。只运行平台启动器；它会扫描并一次准备 Python、Node、Playwright 和 XLSX 依赖。
+6. `start` 返回 `key-required` 或 `setup-error` 时，只显示 `display_text`，不得提交 Kie 生成任务。
+7. 视频生成成功后不得结束对话，必须显示可直接发布本次视频的后续菜单。
 
-从本 `SKILL.md` 定位插件根目录，再从根目录运行对应启动器：
+从本 `SKILL.md` 定位插件根目录，再运行对应启动器：
 
 - Windows：`scripts\h_run.cmd`
 - Intel Mac / Apple Silicon Mac：`./scripts/h_run.sh`
@@ -27,51 +28,48 @@ H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理�
 <launcher> start
 ```
 
-启动器按固定顺序处理环境：插件内置运行时、已缓存的 GitHub 运行时、Codex/系统 Python、从 H GitHub Release 下载的匹配运行时，最后才允许使用系统包管理器回退。下载包必须通过内置 SHA-256 校验，并缓存到 `<home>/.codex/cache/h/github-runtime`。不得要求用户下载 ZIP、解压插件或自行安装 Python。
+启动器会复用已有环境；缺少 Python 时从 H GitHub Release 下载匹配运行时，缺少 Node 时从 Node.js 官方发布地址下载固定版本并校验内置 SHA-256。所有运行时缓存到 `<home>/.codex/cache/h/`，用户不需要安装 Python、Node、npm、pip、Homebrew 或 `requests`。
+
+## 顶层模式
+
+顶层固定为：
+
+1. 批处理
+2. 单处理
+3. 发布
+
+第 3 项用于直接发布已有视频或计划表；批量或单次视频生成成功后也必须进入同一发布流程。
 
 ## 固定状态
 
-只允许下列状态；显示前必须调用 `<launcher> protocol <state>`：
+显示前必须调用 `<launcher> protocol <state>`：
 
 | 状态 | 用途 |
 | --- | --- |
-| `mode` | 选择批处理或单处理 |
+| `mode` | 选择批处理、单处理或发布 |
 | `batch-root` | 取得批处理根目录 |
-| `batch-image` | 一次取得图片模型、1/2/4K、比例、反推模型和元提示词 |
-| `batch-video` | 一次取得视频模型、时长、分辨率、比例、反推模型和元提示词 |
+| `batch-image` | 图片模型、1/2/4K、比例、反推模型和元提示词 |
+| `batch-video` | 视频模型、时长、分辨率、比例、反推模型和元提示词 |
 | `single-kind` | 选择文本、图像或视频 |
 | `single-text` | 文本模型和 prompt |
-| `single-image` | 图像模型、1/2/4K、比例、prompt 和零张或多张参考图 |
-| `single-video` | 视频模型、最大时长和模型所需媒体 |
+| `single-image` | 图片模型、分辨率、比例、prompt 和参考图 |
+| `single-video` | 视频模型、最大时长和所需媒体 |
 | `post-images` | 批量图片完成后的下一步 |
-| `post-videos` | 批量视频完成后的下一步 |
-| `post-single` | 单处理完成后的下一步 |
+| `post-videos` | 批量视频完成后，可直接发布本次结果 |
+| `post-single` | 单次文本或图片完成后的下一步 |
+| `post-single-video` | 单次视频完成后，可直接发布本次结果 |
+| `publish-source` | 选择 H 结果、普通视频目录或现有计划表 |
+| `publish-plan` | 一次取得账号、时间、间隔、文案、标签、PID 和时区 |
+| `publish-file` | 取得现有 XLSX/CSV 计划表 |
+| `publish-review` | 计划生成后的预览入口 |
+| `publish-confirm` | 预览成功后的正式发布确认 |
+| `post-publish` | 发布后的日志、新任务或返回生成 |
 
-若用户在首次消息中已经明确模式或给齐参数，仍先静默执行 `start`。环境 ready 后可直接进入对应状态，不重复询问已有信息。
+若首次消息已经给齐参数，仍先静默执行 `start`，环境 ready 后直接进入对应流程，不重复询问已有信息。
 
-固定流转：
+## 生成阶段
 
-- `mode` 选 1 -> `batch-root`；选 2 -> `single-kind`。
-- 取得批处理根目录 -> `batch-image` -> 执行图片批处理 -> `post-images`。
-- `post-images` 选继续视频 -> `batch-video` -> 执行视频批处理 -> `post-videos`。
-- `single-kind` 选文本/图像/视频 -> `single-text` / `single-image` / `single-video` -> 执行 -> `post-single`。
-- “重试”使用原命令或 `resume`，不得创建新的重复任务；“新的处理”回到对应固定状态。
-
-## 密钥与验证
-
-密钥读取顺序：`--api-key`、`H_KIE_API_KEY`、`KIE_API_KEY`、`<home>/.codex/secrets/h_kie_api_key.txt`、插件本地 `.h_api_key`。不得把密钥写入仓库、回复或日志。
-
-第一次本地环境准备完成且检测到密钥时，`start` 会验证一次 Kie；验证成功后缓存当前插件版本的 ready 状态，避免每次打开都等待。需要主动复验时运行：
-
-```text
-<launcher> start --force-check
-```
-
-失败必须使用返回归因：`authentication` 密钥、`quota` 额度、`validation` 参数、`rate_limit` 限流、`maintenance/provider` 服务端、`network` 网络/TLS、`runtime` 本地环境。验证失败时不得盲目重试生成。
-
-## 批处理
-
-批处理递归扫描用户给出的整个根目录。所有合格 PID 图片必须一次性进入同一个并发池；子文件夹只用于保持输出层级，绝不能逐文件夹提交后等待。`--workers 0` 表示按整棵目录的任务数并发，最多 64。
+批处理递归扫描整个根目录。所有合格 PID 图片一次性进入同一个并发池；不得逐文件夹等待。`--workers 0` 表示按整棵目录任务数并发，最多 64。
 
 图片命令：
 
@@ -79,13 +77,7 @@ H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理�
 <launcher> process-images <根目录> --workers 0 --image-model <编号> --image-resolution <编号> --aspect-ratio <编号> --reverse-model <编号> --image-reverse-meta-prompt <提示词>
 ```
 
-默认中文图片反推元提示词：
-
-```text
-将每张产品图片反推为详细、可直接用于 Kie 的图片生成提示词，严格保留服装版型、颜色、面料和细节。PID：{pid}
-```
-
-每个 PID 都要把自己的原图上传给 Kie 文本模型反推，再把同一原图和反推结果交给图片模型。不得跨 PID 复用反推文本。不得把不同 PID 合并成一个多图参考任务。
+每个 PID 必须把自己的原图上传给 Kie 文本模型反推，再把同一原图和反推结果交给图片模型。不得跨 PID 复用反推文本，不得把不同 PID 合并为一个参考任务。
 
 视频命令：
 
@@ -93,32 +85,63 @@ H 只调用 Kie。用户界面只有两个顶层模式：批处理、单处理�
 <launcher> generate-videos <同一根目录> --workers 0 --video-model <编号> --duration <秒> --video-resolution <分辨率> --aspect-ratio <编号> --reverse-model <编号> --video-reverse-meta-prompt <提示词>
 ```
 
-命令结束后读取末尾 JSON，固定报告输出目录、成功数、失败数、失败 PID 和 `error_category`，然后立即显示对应 `post-*` 菜单。退出码 `2` 仅表示部分项目失败，不是整批崩溃。
-
-## 单处理
-
-单处理只提交一个用户所选模型任务：
+单处理命令：
 
 ```text
 <launcher> single --kind <text|image|video> --model <编号> --prompt <提示词> [模型参数]
 ```
 
-- 图像不上传图片即文生图；上传一张或多张即多图参考生成。每张图片按用户顺序重复传入一个 `--media`，不得只取第一张。
-- 多张参考图共同生成一个结果；每张图各自生成一个结果应切换批处理。
-- 视频图片重复用 `--media`，视频参考重复用 `--video-ref`，音频参考重复用 `--audio-ref`；Gemini Omni 使用 `--audio-id` / `--character-id`。
-- Grok Upscale/Extend 只接受以前的 Kie Grok `--source-task-id`，不得把外部视频冒充任务 ID。
-- 输入数量、比例、分辨率和时长始终以 `single-*` 固定菜单内的实时目录为准，超限必须在提交前报错。
+图像可传零张或多张参考图，每张按顺序重复 `--media`。视频参考按模型要求重复 `--media`、`--video-ref` 或 `--audio-ref`。继续已提交任务使用 `<launcher> resume <JSON任务记录路径>`，不得重复提交已有 task ID。
 
-继续已提交任务：
+生成命令结束后读取末尾 JSON，报告输出目录、成功数、失败数、失败项与 `error_category`。批量视频后显示 `post-videos`；单次视频后显示 `post-single-video`；其他单处理显示 `post-single`。
+
+## 发布连接
+
+选择“发布本次生成的视频”时，直接使用刚才生成结果 JSON 的 `output_root`，不得再次要求用户寻找视频路径。H 会读取成功记录并验证真实 MP4/MOV/WebM 文件头，伪装成 `.mp4` 的 PNG/JPEG 会被拒绝。
+
+先初始化并列出 AdsPower 环境：
 
 ```text
-<launcher> resume <JSON任务记录路径>
+<launcher> adspower init
+<launcher> adspower profiles
 ```
 
-## 输出与续跑
+创建发布计划：
 
-批处理默认输出到 `<home>/Desktop/H返回结果_<根目录名>/`，单处理默认输出到 `<home>/Desktop/H返回结果_单处理/`；内部固定有 `文本/`、`图像/`、`视频/` 三个目录。
+```text
+<launcher> adspower plan --video-root <本次output_root或视频目录> --profile-no <环境编号> [--profile-no <更多编号>] --start-at "YYYY-MM-DD HH:MM" --interval-minutes <分钟> --caption-template <模板> --hashtags <标签> [--attach-pid] [--timezone <IANA时区>]
+```
 
-提交成功后立即保存 `task_id`、请求签名和预期文件。网络中断或超时保留可续跑状态。只有请求签名匹配且文件头有效才命中缓存；图片必须是真实图片文件头，视频必须是真实 MP4/WebM 文件头。更改原图、模型、prompt、比例或分辨率必须重新生成。
+文案模板支持 `{pid}`、`{index}`、`{filename}`。多账号按计划轮流分配；同一个 AdsPower 环境内串行，不同环境按配置并发。`--attach-pid` 只挂完整数字 PID，非数字 PID 留空，绝不按标题模糊匹配。
 
-生成结束绝不能直接结束对话，必须显示相应 `post-images`、`post-videos` 或 `post-single` 菜单。
+独立发布模式可以把普通视频目录交给同一 `plan` 命令，也可以先校验已有计划表：
+
+```text
+<launcher> adspower validate --input-file <XLSX或CSV>
+<launcher> adspower preview --input-file <XLSX或CSV>
+```
+
+正式发布前固定先做无最终点击的预览：
+
+```text
+<launcher> adspower check [--profile-no <环境编号>]
+<launcher> adspower preview --input-file <计划表>
+```
+
+`validate` 只解析和验证表格、视频文件头与完整数字 PID，不打开浏览器。`check` 只进入 TikTok Studio 检查登录、验证码和上传页面，不上传文件。`preview` 允许上传并填写文案、商品和时间，但绝不点击最终 Schedule/Post。后二者默认静默运行；只有排查页面或登录问题时才显式加 `--visible`。
+
+只有用户在预览成功后明确输入 `FABU`，才运行：
+
+```text
+<launcher> adspower publish --input-file <同一计划表> --publish-code FABU
+```
+
+验证码、登录、风控或人工验证出现时立即停止该账号并报告，其他账号继续。最终发布按钮每条任务只点击一次；点击后无法核验时标记 `publish_unverified`，绝不自动重试。
+
+## 输出与续接
+
+Kie 批处理输出到 `<home>/Desktop/H返回结果_<根目录名>/`，单处理输出到 `<home>/Desktop/H返回结果_单处理/`，内部固定有 `文本/`、`图像/`、`视频/`。
+
+AdsPower 工作目录默认为 `<home>/Desktop/H返回结果_发布/`，包含计划表、`profiles.json`、逐次 `logs/`、JSON 报告和截图 `artifacts/`。API Key 只允许在该用户目录的 `config.json` 中，不得写入仓库、回复或日志。
+
+任何生成、预览或发布完成后都必须显示相应 `post-*` 菜单，不能生成一次后没有下文。

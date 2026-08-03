@@ -67,7 +67,7 @@ def sample_catalog():
 
 def test_fixed_protocol_menus():
     launcher = load_launcher()
-    assert launcher.protocol_display("mode", {}) == "请选择处理模式，回复编号即可：\n1. 批处理\n2. 单处理"
+    assert launcher.protocol_display("mode", {}) == "请选择处理模式，回复编号即可：\n1. 批处理\n2. 单处理\n3. 发布"
     assert launcher.protocol_display("single-kind", {}) == "请选择单处理类型，回复编号即可：\n1. 文本\n2. 图像\n3. 视频"
 
     image_menu = launcher.protocol_display("batch-image", sample_catalog())
@@ -85,6 +85,10 @@ def test_fixed_protocol_menus():
 
     batch_video_menu = launcher.protocol_display("batch-video", sample_catalog())
     assert "Grok Upscale" not in batch_video_menu
+    assert "发布本次生成的视频" in launcher.protocol_display("post-videos", {})
+    assert "发布本次生成的视频" in launcher.protocol_display("post-single-video", {})
+    assert "H 已生成的视频结果" in launcher.protocol_display("publish-source", {})
+    assert "输入 FABU 正式发布" in launcher.protocol_display("publish-confirm", {})
 
 
 def test_no_arguments_defaults_to_start():
@@ -97,6 +101,29 @@ def test_no_arguments_defaults_to_start():
     finally:
         launcher.start = original
     assert calls == [{"offline": False, "force_check": False, "forwarded_args": []}]
+
+
+def test_adspower_command_reexecs_inside_the_prepared_private_python():
+    launcher = load_launcher()
+    report = launcher.BootstrapReport(
+        python=str(Path(sys.executable).with_name("h-private-python")),
+        environment_created=False,
+        dependencies_installed=False,
+        missing_before=[],
+        marker_was_current=True,
+        runtime_source="test-python",
+    )
+    calls = []
+    originals = {"bootstrap": launcher.bootstrap, "subprocess_call": launcher.subprocess.call}
+    launcher.bootstrap = lambda: report
+    launcher.subprocess.call = lambda command, **kwargs: calls.append((command, kwargs)) or 23
+    try:
+        assert launcher.main(["adspower", "runtime"]) == 23
+    finally:
+        launcher.bootstrap = originals["bootstrap"]
+        launcher.subprocess.call = originals["subprocess_call"]
+    assert calls[0][0][0] == report.python
+    assert calls[0][0][-2:] == ["adspower", "runtime"]
 
 
 def test_dependency_scanner_detects_missing_imports():
@@ -213,6 +240,7 @@ def test_start_attributes_api_failure_without_submitting_work():
         "local_checks": launcher.local_checks,
         "ready_cache_valid": launcher.ready_cache_valid,
         "run_api_doctor": launcher.run_api_doctor,
+        "ensure_adspower_runtime": launcher.ensure_adspower_runtime,
     }
     launcher.bootstrap = lambda: report
     launcher.local_checks = lambda *_args, **_kwargs: {
@@ -220,6 +248,7 @@ def test_start_attributes_api_failure_without_submitting_work():
         "kie_key_sources": ["test-key-source"],
     }
     launcher.ready_cache_valid = lambda: False
+    launcher.ensure_adspower_runtime = lambda **_kwargs: {"ready": True, "source": "test"}
     launcher.run_api_doctor = lambda *_args, **_kwargs: (
         1,
         {"ready": False, "error_category": "authentication", "error": "invalid key"},
@@ -269,6 +298,60 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "/opt/homebrew/bin/brew" in shell
     assert "/usr/local/bin/brew" in shell
     assert "python@3.12" in shell
+
+
+def test_adspower_runtime_is_bundled_and_node_downloads_are_pinned():
+    launcher = load_launcher()
+    assert launcher.adspower_dependencies_ready()
+    assert launcher.NODE_VERSION.startswith("v24.")
+    assert set(launcher.NODE_ASSETS) == {"windows-x64", "macos-intel", "macos-apple-silicon"}
+    assert all(len(item["sha256"]) == 64 for item in launcher.NODE_ASSETS.values())
+    assert (PLUGIN_ROOT / "scripts" / "adspower_runtime" / "node_modules" / "playwright" / "package.json").is_file()
+    assert "openpyxl" in launcher.REQUIRED_IMPORTS
+    assert not (PLUGIN_ROOT / "scripts" / "adspower_runtime" / "node_modules" / "xlsx").exists()
+    build_source = (SCRIPT_DIR / "build_portable.py").read_text(encoding="utf-8")
+    assert 'PAYLOAD_SCRIPT_DIRECTORIES = ["adspower_runtime"]' in build_source
+    assert 'collect_packages=("openpyxl",)' in build_source
+
+
+def test_missing_node_is_automatically_downloaded_once():
+    launcher = load_launcher()
+    calls = []
+
+    class FakeLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    originals = {
+        "adspower_dependencies_ready": launcher.adspower_dependencies_ready,
+        "node_platform_id": launcher.node_platform_id,
+        "node_works": launcher.node_works,
+        "which": launcher.shutil.which,
+        "download_node_runtime": launcher.download_node_runtime,
+        "run_quiet": launcher.run_quiet,
+        "BootstrapLock": launcher.BootstrapLock,
+    }
+    launcher.adspower_dependencies_ready = lambda: True
+    launcher.node_platform_id = lambda: "macos-apple-silicon"
+    launcher.node_works = lambda _path: False
+    launcher.shutil.which = lambda _name: None
+    launcher.download_node_runtime = lambda platform_id: calls.append(platform_id) or Path("/cache/node")
+    launcher.run_quiet = lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="v24.18.1\n")
+    launcher.BootstrapLock = FakeLock
+    try:
+        result = launcher.ensure_adspower_runtime(install=True)
+    finally:
+        for name, value in originals.items():
+            if name == "which":
+                launcher.shutil.which = value
+            else:
+                setattr(launcher, name, value)
+    assert calls == ["macos-apple-silicon"]
+    assert result["ready"] is True
+    assert result["source"] == "downloaded-verified"
 
 
 def test_github_marketplace_install_contract():

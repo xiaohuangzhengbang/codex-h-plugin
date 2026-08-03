@@ -3,15 +3,23 @@
 
 from __future__ import annotations
 
+import argparse
+import csv
 import getpass
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import urllib.request
+import zipfile
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +36,35 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).exp
 CACHE_ROOT = CODEX_HOME / "cache" / "h"
 USER_KEY_FILE = CODEX_HOME / "secrets" / "h_kie_api_key.txt"
 LOCAL_KEY_FILE = PLUGIN_ROOT / ".h_api_key"
-REQUIRED_IMPORTS = ["requests"]
+REQUIRED_IMPORTS = ["requests", "openpyxl"]
 MIN_PYTHON = (3, 10)
-PROTOCOL_VERSION = "h-fixed-v1"
+PROTOCOL_VERSION = "h-fixed-v2"
 GREETING = "哈喽小杨，你又开始工作啦，想不想小黄啊？"
-MODE_MENU = "请选择处理模式，回复编号即可：\n1. 批处理\n2. 单处理"
+MODE_MENU = "请选择处理模式，回复编号即可：\n1. 批处理\n2. 单处理\n3. 发布"
+ADSPOWER_RUNTIME_DIR = PLUGIN_ROOT / "scripts" / "adspower_runtime"
+ADSPOWER_CLI = ADSPOWER_RUNTIME_DIR / "src" / "cli.mjs"
+ADSPOWER_CONFIG_TEMPLATE = ADSPOWER_RUNTIME_DIR / "config.adspower.tiktok.example.json"
+ADSPOWER_SCHEDULE_TEMPLATE = PLUGIN_ROOT / "assets" / "adspower-schedule-template.xlsx"
+ADSPOWER_SCHEDULE_CSV = PLUGIN_ROOT / "assets" / "adspower-schedule.csv"
+NODE_VERSION = "v24.18.1"
+NODE_ASSETS = {
+    "windows-x64": {
+        "filename": f"node-{NODE_VERSION}-win-x64.zip",
+        "sha256": "ec56b84a7551893ab2324ebdfdc4ab974a63b4781162600b68a1293cc3e53765",
+        "executable": "node.exe",
+    },
+    "macos-intel": {
+        "filename": f"node-{NODE_VERSION}-darwin-x64.tar.gz",
+        "sha256": "6fb20fceacbb157c2f95825b80df4a454a0f6d81cdcd7bb81eeae9147e0e76ec",
+        "executable": "bin/node",
+    },
+    "macos-apple-silicon": {
+        "filename": f"node-{NODE_VERSION}-darwin-arm64.tar.gz",
+        "sha256": "eb02f7fab96d3d67de40c5ec8566096fcb4c2026728787683ae5a97eb612b941",
+        "executable": "bin/node",
+    },
+}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
 
 
 def configure_utf8_output() -> None:
@@ -119,6 +151,167 @@ def run_quiet(
         raise RuntimeError(
             f"Command timed out after {timeout}s: {' '.join(command[:3])}\n{str(output)[-1000:]}"
         ) from exc
+
+
+def node_platform_id() -> str:
+    machine = platform.machine().lower()
+    if os.name == "nt" and machine in {"amd64", "x86_64"}:
+        return "windows-x64"
+    if sys.platform == "darwin" and machine == "x86_64":
+        return "macos-intel"
+    if sys.platform == "darwin" and machine == "arm64":
+        return "macos-apple-silicon"
+    raise RuntimeError(
+        f"AdsPower publishing supports Windows x64, Intel Mac, and Apple Silicon Mac; current platform is {sys.platform}/{machine}."
+    )
+
+
+def node_works(executable: Path) -> bool:
+    if not executable.is_file():
+        return False
+    result = run_quiet([str(executable), "--version"], timeout=30)
+    if result.returncode != 0:
+        return False
+    version = result.stdout.strip().lstrip("v").split(".", 1)[0]
+    return version.isdigit() and int(version) >= 18
+
+
+def cached_node_path(platform_id: str) -> Path:
+    asset = NODE_ASSETS[platform_id]
+    return CACHE_ROOT / "node" / NODE_VERSION / platform_id / str(asset["executable"])
+
+
+def adspower_dependencies_ready() -> bool:
+    required = [
+        ADSPOWER_CLI,
+        ADSPOWER_CONFIG_TEMPLATE,
+        ADSPOWER_RUNTIME_DIR / "node_modules" / "playwright" / "package.json",
+    ]
+    return all(path.is_file() for path in required)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def assert_archive_member(base: Path, member_name: str, link_name: str = "") -> None:
+    target = (base / member_name).resolve()
+    try:
+        target.relative_to(base.resolve())
+    except ValueError as exc:
+        raise RuntimeError(f"Unsafe Node archive member: {member_name}") from exc
+    if link_name:
+        link_target = (target.parent / link_name).resolve()
+        try:
+            link_target.relative_to(base.resolve())
+        except ValueError as exc:
+            raise RuntimeError(f"Unsafe Node archive link: {member_name} -> {link_name}") from exc
+
+
+def extract_node_archive(archive_path: Path, destination: Path) -> Path:
+    if archive_path.suffix.lower() == ".zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                assert_archive_member(destination, member.filename)
+            archive.extractall(destination)
+    else:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                assert_archive_member(destination, member.name, member.linkname if member.issym() or member.islnk() else "")
+            archive.extractall(destination)
+    roots = [path for path in destination.iterdir() if path.is_dir()]
+    if len(roots) != 1:
+        raise RuntimeError("The verified Node archive did not contain one runtime directory.")
+    return roots[0]
+
+
+def download_node_runtime(platform_id: str) -> Path:
+    asset = NODE_ASSETS[platform_id]
+    target_root = CACHE_ROOT / "node" / NODE_VERSION / platform_id
+    executable = target_root / str(asset["executable"])
+    if node_works(executable):
+        return executable
+
+    download_dir = CACHE_ROOT / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    filename = str(asset["filename"])
+    archive_path = download_dir / filename
+    expected_hash = str(asset["sha256"])
+    if not archive_path.is_file() or sha256_file(archive_path) != expected_hash:
+        archive_path.unlink(missing_ok=True)
+        temporary_path = archive_path.with_suffix(archive_path.suffix + ".part")
+        temporary_path.unlink(missing_ok=True)
+        url = f"https://nodejs.org/download/release/{NODE_VERSION}/{filename}"
+        print(f"H bootstrap: downloading the verified AdsPower runtime for {platform_id}...", flush=True)
+        request = urllib.request.Request(url, headers={"User-Agent": "H-Codex-Plugin/0.3"})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response, temporary_path.open("wb") as handle:
+                shutil.copyfileobj(response, handle, length=1024 * 1024)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+        if sha256_file(temporary_path) != expected_hash:
+            temporary_path.unlink(missing_ok=True)
+            raise RuntimeError(f"Downloaded Node archive failed SHA-256 verification: {filename}")
+        temporary_path.replace(archive_path)
+
+    extract_parent = target_root.parent
+    extract_parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{platform_id}-", dir=str(extract_parent)))
+    try:
+        payload = extract_node_archive(archive_path, staging)
+        if target_root.exists():
+            shutil.rmtree(target_root)
+        shutil.move(str(payload), str(target_root))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    if not node_works(executable):
+        raise RuntimeError(f"The verified Node runtime could not start: {executable}")
+    return executable
+
+
+def ensure_adspower_runtime(*, install: bool) -> dict[str, object]:
+    if not adspower_dependencies_ready():
+        raise RuntimeError("H is missing its bundled AdsPower Playwright runtime files. Reinstall H from GitHub.")
+    platform_id = node_platform_id()
+    candidates: list[tuple[str, Path]] = [("h-cache", cached_node_path(platform_id))]
+    system_node = shutil.which("node")
+    if system_node:
+        candidates.append(("system", Path(system_node)))
+    for source, candidate in candidates:
+        if node_works(candidate):
+            version = run_quiet([str(candidate), "--version"], timeout=30).stdout.strip()
+            return {
+                "ready": True,
+                "platform": platform_id,
+                "node": str(candidate),
+                "node_version": version,
+                "source": source,
+                "dependencies": "bundled",
+            }
+    if not install:
+        return {
+            "ready": False,
+            "platform": platform_id,
+            "node": "",
+            "source": "missing",
+            "dependencies": "bundled",
+        }
+    with BootstrapLock():
+        executable = download_node_runtime(platform_id)
+    version = run_quiet([str(executable), "--version"], timeout=30).stdout.strip()
+    return {
+        "ready": True,
+        "platform": platform_id,
+        "node": str(executable),
+        "node_version": version,
+        "source": "downloaded-verified",
+        "dependencies": "bundled",
+    }
 
 
 class BootstrapLock:
@@ -413,6 +606,12 @@ def doctor(*, offline: bool = False, forwarded_args: list[str] | None = None) ->
     report = bootstrap()
     forwarded_args = forwarded_args or []
     checks = local_checks(report, offline=offline, forwarded_args=forwarded_args)
+    try:
+        checks["adspower_runtime"] = ensure_adspower_runtime(install=not offline)
+    except Exception as exc:
+        if not offline:
+            raise
+        checks["adspower_runtime"] = {"ready": False, "error": safe_reason(exc)}
     sources = checks["kie_key_sources"]
     local_ready = all(
         bool(checks[name])
@@ -498,12 +697,36 @@ def protocol_display(state: str, catalog: dict[str, Any]) -> str:
             f"视频模型：\n{video_models}"
         ),
         "post-images": "请选择下一步：\n1. 继续生成视频\n2. 只重试失败项\n3. 处理新的文件夹\n4. 结束",
-        "post-videos": "请选择下一步：\n1. 只重试失败项\n2. 处理新的文件夹\n3. 结束",
+        "post-videos": "请选择下一步：\n1. 发布本次生成的视频\n2. 只重试失败项\n3. 处理新的文件夹\n4. 结束",
         "post-single": (
             "请选择下一步：\n"
             "1. 重试或继续当前任务（已提交任务只查询，不重复提交）\n"
             "2. 继续新的单处理\n3. 切换到批处理\n4. 结束"
         ),
+        "post-single-video": (
+            "请选择下一步：\n"
+            "1. 发布本次生成的视频\n"
+            "2. 重试或继续当前任务（已提交任务只查询，不重复提交）\n"
+            "3. 继续新的单处理\n4. 切换到批处理\n5. 结束"
+        ),
+        "publish-source": (
+            "请选择发布来源，回复编号即可：\n"
+            "1. H 已生成的视频结果\n"
+            "2. 普通视频文件夹\n"
+            "3. 已有 XLSX/CSV 发布计划表"
+        ),
+        "publish-plan": (
+            "请一次发送：视频或 H 结果目录 / AdsPower 环境编号（可多个） / 首次发布时间 / 间隔分钟 / "
+            "文案模板 / 标签 / 是否按数字 PID 挂商品 / 时区。\n"
+            "文案模板可使用 {pid}、{index}、{filename}；商品只按完整数字 PID 精确匹配。"
+        ),
+        "publish-file": "请发送现有 XLSX 或 CSV 发布计划表的完整路径。",
+        "publish-review": "发布计划已生成并校验。请选择下一步：\n1. 预览上传（不点击最终发布）\n2. 修改计划\n3. 结束",
+        "publish-confirm": (
+            "预览已完成。确认账号、文案、商品 PID 和时间均正确后，输入 FABU 正式发布；\n"
+            "回复 2 修改计划，回复 3 结束。"
+        ),
+        "post-publish": "请选择下一步：\n1. 查看发布结果与日志\n2. 新的发布任务\n3. 返回生成\n4. 结束",
     }
     if state not in menus:
         raise ValueError(f"Unknown H protocol state: {state}")
@@ -514,7 +737,21 @@ def protocol(state: str) -> int:
     report = bootstrap()
     catalog: dict[str, Any] = {}
     normalized = state.strip().lower().replace("_", "-")
-    if normalized not in {"mode", "batch-root", "single-kind", "post-images", "post-videos", "post-single"}:
+    if normalized not in {
+        "mode",
+        "batch-root",
+        "single-kind",
+        "post-images",
+        "post-videos",
+        "post-single",
+        "post-single-video",
+        "publish-source",
+        "publish-plan",
+        "publish-file",
+        "publish-review",
+        "publish-confirm",
+        "post-publish",
+    }:
         catalog = model_catalog(report)
     print_json(
         {
@@ -559,6 +796,12 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
     report = bootstrap()
     forwarded_args = forwarded_args or []
     checks = local_checks(report, offline=offline, forwarded_args=forwarded_args)
+    try:
+        checks["adspower_runtime"] = ensure_adspower_runtime(install=not offline)
+    except Exception as exc:
+        if not offline:
+            raise
+        checks["adspower_runtime"] = {"ready": False, "error": safe_reason(exc)}
     status = setup_status(report)
     if not checks["desktop_writable"]:
         display = f"{GREETING}\n\nH 自动环境准备失败。\n归因：桌面目录不可写。\n请修复桌面目录权限后重新调用 H。"
@@ -628,6 +871,532 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
         }
     )
     return 0
+
+
+def default_adspower_work_dir() -> Path:
+    return desktop_dir() / "H返回结果_发布"
+
+
+def initialize_adspower_workspace(work_dir: Path) -> dict[str, str]:
+    work_dir = work_dir.expanduser().resolve()
+    log_dir = work_dir / "logs"
+    artifacts_dir = work_dir / "artifacts"
+    for directory in (work_dir, log_dir, artifacts_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    config_path = work_dir / "config.json"
+    schedule_path = work_dir / "schedule.xlsx"
+    csv_path = work_dir / "schedule.csv"
+    if not config_path.exists():
+        shutil.copy2(ADSPOWER_CONFIG_TEMPLATE, config_path)
+    if not schedule_path.exists() and ADSPOWER_SCHEDULE_TEMPLATE.is_file():
+        shutil.copy2(ADSPOWER_SCHEDULE_TEMPLATE, schedule_path)
+    if not csv_path.exists() and ADSPOWER_SCHEDULE_CSV.is_file():
+        shutil.copy2(ADSPOWER_SCHEDULE_CSV, csv_path)
+    return {
+        "work_dir": str(work_dir),
+        "config": str(config_path),
+        "schedule": str(schedule_path if schedule_path.exists() else csv_path),
+        "logs": str(log_dir),
+        "artifacts": str(artifacts_dir),
+    }
+
+
+def video_file_valid(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size < 16:
+            return False
+        with path.open("rb") as handle:
+            header = handle.read(16)
+    except OSError:
+        return False
+    return header[4:8] == b"ftyp" or header.startswith(b"\x1aE\xdf\xa3")
+
+
+def iter_result_records(value: object) -> list[dict[str, object]]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def discover_publish_videos(video_root: Path) -> list[dict[str, str]]:
+    root = video_root.expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"Video or H result directory does not exist: {root}")
+    if root.is_file():
+        if root.suffix.lower() not in VIDEO_EXTENSIONS or not video_file_valid(root):
+            raise ValueError(f"The selected file is not a valid MP4/MOV/WebM video: {root}")
+        return [{"path": str(root), "pid": root.stem, "filename": root.name}]
+
+    discovered: dict[str, dict[str, str]] = {}
+    for json_path in root.rglob("*.json"):
+        try:
+            value = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            continue
+        for record in iter_result_records(value):
+            if str(record.get("state", "")).lower() != "success":
+                continue
+            candidate_value = record.get("video_path")
+            if not candidate_value and str(record.get("kind", "")).lower() == "video":
+                candidate_value = record.get("output_path")
+            if not candidate_value:
+                continue
+            candidate = Path(str(candidate_value)).expanduser()
+            if not candidate.is_absolute():
+                candidate = (json_path.parent / candidate).resolve()
+            else:
+                candidate = candidate.resolve()
+            if candidate.suffix.lower() not in VIDEO_EXTENSIONS or not video_file_valid(candidate):
+                continue
+            key = os.path.normcase(str(candidate))
+            discovered[key] = {
+                "path": str(candidate),
+                "pid": str(record.get("pid") or candidate.stem).strip(),
+                "filename": candidate.name,
+            }
+    for candidate in root.rglob("*"):
+        if candidate.suffix.lower() not in VIDEO_EXTENSIONS or not video_file_valid(candidate):
+            continue
+        resolved = candidate.resolve()
+        key = os.path.normcase(str(resolved))
+        discovered.setdefault(
+            key,
+            {"path": str(resolved), "pid": resolved.stem, "filename": resolved.name},
+        )
+    return sorted(discovered.values(), key=lambda item: (item["pid"].lower(), item["path"].lower()))
+
+
+def parse_profiles(values: list[str]) -> list[str]:
+    profiles: list[str] = []
+    for value in values:
+        for item in value.replace("，", ",").split(","):
+            cleaned = item.strip()
+            if cleaned and cleaned not in profiles:
+                profiles.append(cleaned)
+    if not profiles:
+        raise ValueError("At least one AdsPower profile number is required.")
+    return profiles
+
+
+def render_caption(template: str, item: dict[str, str], index: int) -> str:
+    return (
+        template.replace("{pid}", item["pid"])
+        .replace("{index}", str(index))
+        .replace("{filename}", item["filename"])
+    )
+
+
+def create_adspower_plan(args: argparse.Namespace, work_dir: Path) -> dict[str, object]:
+    videos = discover_publish_videos(Path(args.video_root))
+    if not videos:
+        raise ValueError("No valid generated video files were found. PNG/JPEG files renamed to .mp4 are rejected.")
+    profiles = parse_profiles(args.profile_no)
+    try:
+        start_at = datetime.strptime(args.start_at.strip(), "%Y-%m-%d %H:%M")
+    except ValueError as exc:
+        raise ValueError("Start time must use YYYY-MM-DD HH:MM.") from exc
+    if args.interval_minutes < 1:
+        raise ValueError("Interval minutes must be at least 1.")
+    plan_path = (work_dir / args.plan_name).resolve()
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    headers = [
+        "启用",
+        "环境编号",
+        "视频路径",
+        "文案",
+        "标签",
+        "商品PID",
+        "预定时间",
+        "时区",
+        "发布模式",
+        "任务ID",
+    ]
+    skipped_product_pids: list[str] = []
+    with plan_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        for offset, item in enumerate(videos):
+            index = offset + 1
+            pid = item["pid"]
+            product_pid = pid if args.attach_pid and pid.isdigit() else ""
+            if args.attach_pid and not product_pid:
+                skipped_product_pids.append(pid)
+            writer.writerow(
+                {
+                    "启用": "yes",
+                    "环境编号": profiles[offset % len(profiles)],
+                    "视频路径": item["path"],
+                    "文案": render_caption(args.caption_template, item, index),
+                    "标签": args.hashtags.strip(),
+                    "商品PID": product_pid,
+                    "预定时间": (start_at + timedelta(minutes=offset * args.interval_minutes)).strftime("%Y-%m-%d %H:%M"),
+                    "时区": args.timezone.strip(),
+                    "发布模式": args.publish_mode,
+                    "任务ID": f"h-{index:04d}-{''.join(character for character in pid if character.isalnum())[:24] or 'video'}",
+                }
+            )
+    return {
+        "ready": True,
+        "stage": "publish-plan",
+        "plan": str(plan_path),
+        "video_root": str(Path(args.video_root).expanduser().resolve()),
+        "videos": len(videos),
+        "profiles": profiles,
+        "start_at": start_at.strftime("%Y-%m-%d %H:%M"),
+        "interval_minutes": args.interval_minutes,
+        "attach_pid": bool(args.attach_pid),
+        "skipped_non_numeric_pids": skipped_product_pids,
+        "next_state": "publish-review",
+    }
+
+
+def adspower_error_category(value: object) -> str:
+    text = str(value or "").lower()
+    if "captcha" in text or "verification" in text or "验证码" in text or "安全验证" in text:
+        return "manual_verification"
+    if "login" in text or "sign in" in text or "登录" in text:
+        return "login_required"
+    if "adspower api" in text or "127.0.0.1:50325" in text:
+        return "adspower_not_running"
+    if "计划表" in text or "publish-plan" in text or "validation" in text or "does not exist" in text:
+        return "validation"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "final click occurred" in text:
+        return "publish_unverified"
+    return "runtime"
+
+
+def load_json_value(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+
+
+def run_adspower_node(
+    node: Path,
+    arguments: list[str],
+    *,
+    work_dir: Path,
+    timeout: int = 21600,
+    env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return run_quiet(
+        [str(node), *arguments],
+        cwd=work_dir,
+        timeout=timeout,
+        env_overrides=env_overrides,
+    )
+
+
+def schedule_text(value: object) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def schedule_datetime(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    text = schedule_text(value)
+    for pattern in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(text[:16], pattern).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+    return ""
+
+
+def read_schedule_rows(input_path: Path) -> list[list[object]]:
+    extension = input_path.suffix.lower()
+    if extension == ".csv":
+        try:
+            with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                return [list(row) for row in csv.reader(handle)]
+        except UnicodeDecodeError as exc:
+            raise ValueError("CSV publish plans must use UTF-8 encoding.") from exc
+    if extension != ".xlsx":
+        raise ValueError("Only .xlsx and UTF-8 .csv publish plans are supported.")
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise RuntimeError("H did not finish installing its safe XLSX parser. Run H start again.") from exc
+    workbook = load_workbook(input_path, read_only=True, data_only=True)
+    try:
+        sheet = workbook["发布计划"] if "发布计划" in workbook.sheetnames else workbook[workbook.sheetnames[0]]
+        return [list(row) for row in sheet.iter_rows(values_only=True)]
+    finally:
+        workbook.close()
+
+
+def prepare_adspower_tasks(input_path: Path, output_path: Path, mode: str) -> dict[str, object]:
+    rows = read_schedule_rows(input_path)
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if any(schedule_text(value) in {"启用", "enabled"} for value in row)
+        ),
+        -1,
+    )
+    if header_index < 0:
+        raise ValueError("Cannot find the publish-plan header row.")
+    headers = [schedule_text(value) for value in rows[header_index]]
+
+    def pick(row: dict[str, object], *names: str) -> object:
+        for name in names:
+            if name in row and row[name] is not None:
+                return row[name]
+        return ""
+
+    tasks: list[dict[str, object]] = []
+    errors: list[str] = []
+    for index in range(header_index + 1, len(rows)):
+        values = rows[index]
+        row = {header: values[column] if column < len(values) else "" for column, header in enumerate(headers)}
+        enabled = schedule_text(pick(row, "启用", "enabled")).lower()
+        if not enabled or enabled in {"no", "n", "0", "false", "否"}:
+            continue
+        line = index + 1
+        profile_no = schedule_text(pick(row, "环境编号", "profileNo"))
+        raw_video = schedule_text(pick(row, "视频路径", "videoPath")).strip("\"'")
+        video_path = Path(raw_video).expanduser() if raw_video else Path()
+        if raw_video and not video_path.is_absolute():
+            video_path = input_path.parent / video_path
+        video_path = video_path.resolve() if raw_video else video_path
+        scheduled_at = schedule_datetime(pick(row, "预定时间", "scheduledAt"))
+        timezone = schedule_text(pick(row, "时区", "timezone", "timeZone"))
+        caption = schedule_text(pick(row, "文案", "caption"))
+        hashtags = schedule_text(pick(row, "标签", "hashtags"))
+        raw_pid = pick(row, "商品PID", "productPid", "商品关键词", "productKeyword")
+        if raw_pid not in {None, ""} and input_path.suffix.lower() == ".xlsx" and not isinstance(raw_pid, str):
+            product_pid = ""
+            errors.append(f"第 {line} 行商品PID被 Excel 当成数字，必须把该单元格设为文本后重新填写完整 PID")
+        else:
+            product_pid = schedule_text(raw_pid).lstrip("'")
+        publish_mode = schedule_text(pick(row, "发布模式", "publishMode")).lower()
+        task_id = schedule_text(pick(row, "任务ID", "taskId")) or f"profile-{profile_no}-row-{line}"
+
+        if not profile_no:
+            errors.append(f"第 {line} 行缺少环境编号")
+        if not raw_video:
+            errors.append(f"第 {line} 行缺少视频路径")
+        elif not video_file_valid(video_path):
+            errors.append(f"第 {line} 行视频不存在或文件头不是有效 MP4/MOV/WebM：{video_path}")
+        if not scheduled_at:
+            errors.append(f"第 {line} 行预定时间无效")
+        if product_pid and not product_pid.isdigit():
+            errors.append(f"第 {line} 行商品PID必须是完整数字，不能使用标题、模糊关键词或科学计数法")
+        tasks.append(
+            {
+                "id": task_id,
+                "profileNo": profile_no,
+                "videoPath": str(video_path),
+                "description": " ".join(value for value in (caption, hashtags) if value),
+                "productPid": product_pid,
+                "productKeyword": product_pid,
+                "scheduledAt": scheduled_at,
+                "timezone": timezone,
+                "publish": mode == "publish" and publish_mode != "draft",
+            }
+        )
+    if errors:
+        raise ValueError("计划表校验失败：\n- " + "\n- ".join(errors))
+    if not tasks:
+        raise ValueError("计划表中没有启用的任务。")
+    output_path.write_text(json.dumps(tasks, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"input": str(input_path), "tasks": len(tasks), "mode": mode}
+
+
+def resolve_adspower_input(args: argparse.Namespace, work_dir: Path, workspace: dict[str, str]) -> Path:
+    input_path = Path(args.input_file).expanduser().resolve() if args.input_file else work_dir / "schedule.generated.csv"
+    if not input_path.is_file():
+        fallback = Path(workspace["schedule"])
+        input_path = fallback if not args.input_file and fallback.is_file() else input_path
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Publish plan does not exist: {input_path}")
+    return input_path
+
+
+def execute_adspower_plan(
+    command: str,
+    args: argparse.Namespace,
+    node: Path,
+    work_dir: Path,
+    workspace: dict[str, str],
+) -> int:
+    if command == "publish" and args.publish_code != "FABU":
+        raise ValueError("Formal publishing requires the exact confirmation code FABU.")
+    input_path = resolve_adspower_input(args, work_dir, workspace)
+
+    tasks_path = work_dir / f"tasks.{command}.json"
+    prepare_adspower_tasks(input_path, tasks_path, command)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    report_path = work_dir / "logs" / f"{command}-{stamp}.json"
+    log_path = work_dir / "logs" / f"{command}-{stamp}.log"
+    result = run_adspower_node(
+        node,
+        [
+            str(ADSPOWER_CLI),
+            "--config",
+            workspace["config"],
+            "--tasks",
+            str(tasks_path),
+            "--report",
+            str(report_path),
+        ],
+        work_dir=work_dir,
+        env_overrides={"ADSPOWER_PUBLISH_HEADLESS": "0" if args.visible else "1"},
+    )
+    log_path.write_text(result.stdout, encoding="utf-8")
+    report = load_json_value(report_path)
+    entries = report if isinstance(report, list) else []
+    failed = sum(1 for item in entries if isinstance(item, dict) and item.get("status") not in {"preview_ready", "published"})
+    payload = {
+        "ready": result.returncode == 0 and failed == 0,
+        "stage": command,
+        "work_dir": str(work_dir),
+        "input_file": str(input_path),
+        "tasks": str(tasks_path),
+        "report": str(report_path),
+        "log": str(log_path),
+        "total": len(entries),
+        "success": len(entries) - failed,
+        "failed": failed,
+        "results": entries,
+        "next_state": "publish-confirm" if command == "preview" and failed == 0 else "post-publish",
+    }
+    if result.returncode != 0 and not entries:
+        payload["error_category"] = adspower_error_category(result.stdout)
+        payload["error"] = safe_reason(result.stdout[-1500:])
+    print_json(payload)
+    return result.returncode
+
+
+def add_adspower_work_dir(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--work-dir", default=str(default_adspower_work_dir()))
+
+
+def build_adspower_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="h_run adspower", description="H AdsPower TikTok publishing workflow")
+    commands = parser.add_subparsers(dest="ads_command", required=True)
+    add_adspower_work_dir(commands.add_parser("init"))
+
+    profiles = commands.add_parser("profiles")
+    add_adspower_work_dir(profiles)
+
+    check = commands.add_parser("check")
+    add_adspower_work_dir(check)
+    check.add_argument("--profile-no", action="append", default=[])
+    check.add_argument("--concurrency", type=int, default=3)
+    check.add_argument("--visible", action="store_true")
+
+    plan = commands.add_parser("plan")
+    add_adspower_work_dir(plan)
+    plan.add_argument("--video-root", required=True)
+    plan.add_argument("--profile-no", action="append", required=True)
+    plan.add_argument("--start-at", required=True)
+    plan.add_argument("--interval-minutes", type=int, default=60)
+    plan.add_argument("--caption-template", default="{pid}")
+    plan.add_argument("--hashtags", default="")
+    plan.add_argument("--timezone", default="")
+    plan.add_argument("--attach-pid", action="store_true")
+    plan.add_argument("--publish-mode", choices=["schedule", "draft"], default="schedule")
+    plan.add_argument("--plan-name", default="schedule.generated.csv")
+
+    for name in ("validate", "preview", "publish"):
+        action = commands.add_parser(name)
+        add_adspower_work_dir(action)
+        action.add_argument("--input-file", default="")
+        if name != "validate":
+            action.add_argument("--visible", action="store_true")
+        if name == "publish":
+            action.add_argument("--publish-code", default="")
+
+    add_adspower_work_dir(commands.add_parser("runtime"))
+    return parser
+
+
+def adspower_command(argv: list[str]) -> int:
+    args = build_adspower_parser().parse_args(argv)
+    runtime = ensure_adspower_runtime(install=True)
+    node = Path(str(runtime["node"]))
+    work_dir = Path(args.work_dir).expanduser().resolve()
+    workspace = initialize_adspower_workspace(work_dir)
+    command = args.ads_command
+    if command == "runtime":
+        print_json({"ready": True, "stage": "runtime", "runtime": runtime, "workspace": workspace})
+        return 0
+    if command == "init":
+        print_json({"ready": True, "stage": "init", "runtime": runtime, "workspace": workspace, "next_state": "publish-source"})
+        return 0
+    if command == "plan":
+        print_json(create_adspower_plan(args, work_dir))
+        return 0
+    if command == "validate":
+        input_path = resolve_adspower_input(args, work_dir, workspace)
+        tasks_path = work_dir / "tasks.validated.json"
+        validation = prepare_adspower_tasks(input_path, tasks_path, "preview")
+        print_json(
+            {
+                "ready": True,
+                "stage": "validate",
+                "input_file": str(input_path),
+                "tasks": str(tasks_path),
+                "count": validation["tasks"],
+                "next_state": "publish-review",
+            }
+        )
+        return 0
+    if command == "profiles":
+        output_path = work_dir / "profiles.json"
+        result = run_adspower_node(
+            node,
+            [str(ADSPOWER_CLI), "--config", workspace["config"], "--list-windows", "--out", str(output_path)],
+            work_dir=work_dir,
+            timeout=180,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stdout[-2000:])
+        profiles = load_json_value(output_path)
+        print_json({"ready": True, "stage": "profiles", "profiles_file": str(output_path), "profiles": profiles})
+        return 0
+    if command == "check":
+        output_path = work_dir / "logs" / f"check-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        node_args = [
+            str(ADSPOWER_CLI),
+            "--config",
+            workspace["config"],
+            "--check-tiktok-upload",
+            "--concurrency",
+            str(max(1, args.concurrency)),
+            "--out",
+            str(output_path),
+        ]
+        if args.profile_no:
+            node_args.extend(["--names", ",".join(parse_profiles(args.profile_no))])
+        result = run_adspower_node(
+            node,
+            node_args,
+            work_dir=work_dir,
+            timeout=3600,
+            env_overrides={"ADSPOWER_PUBLISH_HEADLESS": "0" if args.visible else "1"},
+        )
+        report = load_json_value(output_path)
+        print_json(
+            {
+                "ready": result.returncode == 0,
+                "stage": "check",
+                "report": str(output_path),
+                "results": report if isinstance(report, list) else [],
+                "error_category": "" if result.returncode == 0 else adspower_error_category(result.stdout),
+                "error": "" if result.returncode == 0 else safe_reason(result.stdout[-1500:]),
+            }
+        )
+        return result.returncode
+    return execute_adspower_plan(command, args, node, work_dir, workspace)
 
 
 def install_home() -> Path:
@@ -809,12 +1578,31 @@ def main(argv: list[str]) -> int:
             if len(argv) != 2:
                 raise ValueError("Usage: h_run protocol <state>")
             return protocol(argv[1])
+        if command == "adspower":
+            report = bootstrap()
+            if report.runtime_source != "packaged-executable" and Path(sys.executable).resolve() != Path(report.python).resolve():
+                return subprocess.call(
+                    [report.python, str(Path(__file__).resolve()), *argv],
+                    cwd=str(PLUGIN_ROOT),
+                    env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                )
+            return adspower_command(argv[1:])
         report = bootstrap()
         return subprocess.call(core_command(report, argv), cwd=str(PLUGIN_ROOT))
     except Exception as exc:
         if command in {"start", "protocol"}:
             print_json(startup_failure(exc))
             return 0
+        if command == "adspower":
+            print_json(
+                {
+                    "ready": False,
+                    "stage": "publish",
+                    "error_category": adspower_error_category(exc),
+                    "error": safe_reason(exc),
+                }
+            )
+            return 1
         raise
 
 

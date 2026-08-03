@@ -54,7 +54,7 @@ def main():
         assert first["state"] == "mode"
         assert first["bootstrap"]["environment_created"] is True
         assert first["bootstrap"]["dependencies_installed"] is True
-        assert "requests" in first["bootstrap"]["missing_before"]
+        assert set(first["bootstrap"]["missing_before"]) == {"requests", "openpyxl"}
 
         second = run_start(codex_home)
         assert second["ready"] is True

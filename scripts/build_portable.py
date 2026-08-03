@@ -26,6 +26,7 @@ PLATFORM_NAMES = {
 PAYLOAD_DIRECTORIES = [".codex-plugin", "assets", "skills"]
 PAYLOAD_FILES = ["README.md", "INSTALL.md", "LICENSE", "requirements.txt"]
 PAYLOAD_SCRIPTS = ["h_run.py", "h_run.cmd", "h_run.sh", "h_bootstrap.ps1", "kie_video_batch.py"]
+PAYLOAD_SCRIPT_DIRECTORIES = ["adspower_runtime"]
 
 
 def run(command: list[str], *, cwd: Path = ROOT, timeout: int = 900) -> subprocess.CompletedProcess[str]:
@@ -77,9 +78,19 @@ def copy_payload(payload: Path) -> None:
     scripts.mkdir()
     for name in PAYLOAD_SCRIPTS:
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    for name in PAYLOAD_SCRIPT_DIRECTORIES:
+        shutil.copytree(ROOT / "scripts" / name, scripts / name)
 
 
-def build_binary(name: str, script: Path, runtime_dir: Path, work_root: Path, *, include_certifi: bool) -> Path:
+def build_binary(
+    name: str,
+    script: Path,
+    runtime_dir: Path,
+    work_root: Path,
+    *,
+    include_certifi: bool,
+    collect_packages: tuple[str, ...] = (),
+) -> Path:
     (work_root / "specs").mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
@@ -99,6 +110,8 @@ def build_binary(name: str, script: Path, runtime_dir: Path, work_root: Path, *,
     ]
     if include_certifi:
         command.extend(["--collect-data", "certifi"])
+    for package in collect_packages:
+        command.extend(["--collect-all", package])
     command.append(str(script))
     run(command, timeout=1200)
     binary = runtime_dir / (f"{name}.exe" if os.name == "nt" else name)
@@ -201,6 +214,40 @@ def smoke_test(package_root: Path) -> None:
         payload = parse_last_json(protocol.stdout)
         if protocol.returncode != 0 or not payload.get("ready") or "GPT Image-2" not in payload.get("display_text", ""):
             raise RuntimeError(f"Installed portable H protocol smoke test failed:\n{protocol.stdout[-4000:]}")
+        from openpyxl import Workbook
+
+        video = home / "publish-smoke.mp4"
+        video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41")
+        schedule = home / "publish-smoke.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "发布计划"
+        sheet.append(["启用", "环境编号", "视频路径", "商品PID", "预定时间", "发布模式"])
+        sheet.append(["yes", "1", str(video), "123456", "2026-08-04 10:30", "schedule"])
+        workbook.save(schedule)
+        ads_validate = subprocess.run(
+            [
+                str(installed_launcher),
+                "adspower",
+                "validate",
+                "--work-dir",
+                str(home / "publish-work"),
+                "--input-file",
+                str(schedule),
+            ],
+            cwd=str(installed_launcher.parent.parent),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=300,
+        )
+        ads_payload = parse_last_json(ads_validate.stdout)
+        if ads_validate.returncode != 0 or not ads_payload.get("ready") or ads_payload.get("count") != 1:
+            raise RuntimeError(f"Portable H AdsPower/XLSX smoke test failed:\n{ads_validate.stdout[-4000:]}")
         marketplace = json.loads((home / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8"))
         h_entries = [item for item in marketplace["plugins"] if item.get("name") == "h"]
         if len(h_entries) != 1 or h_entries[0]["policy"]["installation"] != "INSTALLED_BY_DEFAULT":
@@ -236,7 +283,14 @@ def main() -> int:
     runtime.mkdir()
     work_root = build_root / "pyinstaller"
     build_binary("h_core", ROOT / "scripts" / "kie_video_batch.py", runtime, work_root, include_certifi=True)
-    build_binary("h_launcher", ROOT / "scripts" / "h_run.py", runtime, work_root, include_certifi=False)
+    build_binary(
+        "h_launcher",
+        ROOT / "scripts" / "h_run.py",
+        runtime,
+        work_root,
+        include_certifi=False,
+        collect_packages=("openpyxl",),
+    )
     write_installers(package_root, args.platform)
     info = {
         "name": package_name,
@@ -244,8 +298,10 @@ def main() -> int:
         "architecture": platform.machine(),
         "plugin_version": json.loads((payload / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"],
         "requires_python": False,
+        "requires_node": False,
         "requires_git": False,
         "requires_homebrew": False,
+        "bundled_adspower_playwright": True,
     }
     (package_root / "PACKAGE-INFO.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     smoke_test(package_root)

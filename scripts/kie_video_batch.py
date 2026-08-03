@@ -1601,9 +1601,18 @@ def next_actions(stage: str) -> list[dict[str, str]]:
         ]
     if stage == "videos":
         return [
-            {"id": "1", "action": "只重试失败项"},
-            {"id": "2", "action": "处理新的文件夹"},
-            {"id": "3", "action": "结束"},
+            {"id": "1", "action": "发布本次生成的视频"},
+            {"id": "2", "action": "只重试失败项"},
+            {"id": "3", "action": "处理新的文件夹"},
+            {"id": "4", "action": "结束"},
+        ]
+    if stage == "single-video":
+        return [
+            {"id": "1", "action": "发布本次生成的视频"},
+            {"id": "2", "action": "重试或继续当前任务（已提交任务只查询，不重复提交）"},
+            {"id": "3", "action": "继续新的单处理"},
+            {"id": "4", "action": "切换到批处理"},
+            {"id": "5", "action": "结束"},
         ]
     return [
         {"id": "1", "action": "重试或继续当前任务（已提交任务只查询，不重复提交）"},
@@ -2184,6 +2193,8 @@ def generate_videos(args: argparse.Namespace) -> int:
         "text_dir": str(root / "文本"),
         "image_dir": str(root / "图像"),
         "video_dir": str(root / "视频"),
+        "publish_source": str(root),
+        "publishable_videos": aggregate["success"],
         "processed_input_dir": str(processed_input_dir),
         "batch_manifest": str(batch_summary_path),
         "stats": aggregate,
@@ -2301,9 +2312,10 @@ def single_call(args: argparse.Namespace) -> int:
         "text_dir": str(text_dir),
         "image_dir": str(image_dir),
         "video_dir": str(video_dir),
+        "publish_source": str(root) if args.kind == "video" else "",
         "prompt": args.prompt,
         "created_at": utc_timestamp(),
-        "next_actions": next_actions("single"),
+        "next_actions": next_actions("single-video" if args.kind == "video" else "single"),
     }
     try:
         is_video_transform = args.kind == "video" and resolve_video_model(args.model)[1] in VIDEO_TRANSFORM_MODELS
@@ -2525,7 +2537,10 @@ def resume_command(args: argparse.Namespace) -> int:
     if not output_value:
         raise ValueError(f"H task record has no expected output path: {record_path}")
     output_path = Path(output_value).expanduser().resolve()
-    stage = "single" if record.get("mode") == "单处理" else ("videos" if kind == "video" else "images")
+    if record.get("mode") == "单处理":
+        stage = "single-video" if kind == "video" else "single"
+    else:
+        stage = "videos" if kind == "video" else "images"
     try:
         state, result_url, final_raw = wait_for_result(
             args.api_key,

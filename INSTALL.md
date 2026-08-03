@@ -28,9 +28,11 @@ After installation, fully quit and reopen Codex, then start a new task and invok
 
 ## First Run
 
-The installed source plugin does not assume that Python, pip, Homebrew, or Git is available on the target computer.
+The installed source plugin does not assume that Python, Node, npm, pip, Homebrew, or Git is available on the target computer.
 
-The platform launcher first reuses an existing compatible environment. If none exists, it downloads the matching Windows x64, Intel Mac, or Apple Silicon runtime from this repository's GitHub Release, verifies its pinned SHA-256 digest, caches it under `~/.codex/cache/h/github-runtime`, and starts H. Homebrew and winget are last-resort fallbacks only.
+The platform launcher first reuses an existing compatible environment. If Python is missing, it downloads the matching Windows x64, Intel Mac, or Apple Silicon runtime from this repository's GitHub Release and verifies its pinned SHA-256 digest. It also scans Node and, when missing, downloads a pinned Node.js LTS archive for the same platform and verifies a built-in SHA-256 digest. Playwright and XLSX packages ship with H. All reusable files are cached under `~/.codex/cache/h`; Homebrew and winget are last-resort fallbacks only.
+
+After Kie video generation, H can create an AdsPower schedule directly from the successful result manifest, run a no-final-click preview, and publish only after the explicit `FABU` confirmation. Standalone publishing from a video folder or XLSX/CSV plan is also available from mode 3.
 
 ## Kie Key
 

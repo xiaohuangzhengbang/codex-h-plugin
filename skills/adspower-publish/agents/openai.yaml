@@ -1,0 +1,4 @@
+interface:
+  display_name: "H 生成与发布"
+  short_description: "把 H 生成视频接入 AdsPower 发布"
+  default_prompt: "使用 H 把生成的视频接入 AdsPower，先检查和预览，再按确认安全发布到 TikTok。"

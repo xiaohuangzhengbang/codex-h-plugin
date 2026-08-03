@@ -44,7 +44,16 @@ jobs:
       - name: Run regression tests
         run: |
           python scripts/test_h_launcher.py
+          python scripts/test_adspower_pipeline.py
           python scripts/test_kie_result_url.py
+      - name: Validate AdsPower JavaScript runtime
+        run: |
+          node --check scripts/adspower_runtime/src/cli.mjs
+          node --check scripts/adspower_runtime/src/publisher.mjs
+          node --check scripts/adspower_runtime/src/tiktok-checker.mjs
+      - name: Audit AdsPower Node dependencies
+        working-directory: scripts/adspower_runtime
+        run: npm audit --omit=dev --audit-level=moderate
       - name: Validate Python syntax
         run: python -m compileall -q scripts
       - name: Validate catalog without a Kie key
@@ -52,7 +61,7 @@ jobs:
       - name: Reject committed secrets
         shell: bash
         run: |
-          if git grep -n -I -E '(sk-[A-Za-z0-9]{16,}|(^|[^a-f0-9])[a-f0-9]{32}([^a-f0-9]|$))' -- . ':!assets/*'; then
+          if git grep -n -I -E '(sk-[A-Za-z0-9]{16,}|(^|[^a-f0-9])[a-f0-9]{32}([^a-f0-9]|$))' -- . ':!assets/*' ':!scripts/adspower_runtime/node_modules/**' ':!scripts/adspower_runtime/package-lock.json'; then
             echo "Potential API key committed"
             exit 1
           fi

@@ -1,7 +1,7 @@
 {
   "name": "h",
-  "version": "0.2.0+codex.20260717013213",
-  "description": "GitHub-installed Kie-only batch and single workflow with automatic runtime setup.",
+  "version": "0.3.0+codex.20260803053917",
+  "description": "GitHub-installed Kie generation and AdsPower TikTok publishing workflow with automatic runtime setup.",
   "author": {
     "name": "XIAOH"
   },
@@ -11,25 +11,31 @@
     "product-image",
     "image-to-video",
     "batch-video",
-    "pid"
+    "pid",
+    "adspower",
+    "tiktok-publishing"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "H",
-    "shortDescription": "GitHub-installed fixed Kie workflows with automatic setup.",
-    "longDescription": "H installs from its GitHub marketplace and runs Kie-only workflows through one deterministic Chinese menu protocol with two modes: recursive whole-folder concurrent batch processing and one-model single processing. On first use it detects the platform and, when no suitable Python exists, downloads and verifies the matching Windows, Intel Mac, or Apple Silicon runtime from the same GitHub repository. It validates Kie before generation, saves task IDs for safe resume, validates downloaded media, and writes Desktop text, image, and video folders.",
+    "shortDescription": "Kie \u751f\u6210\u540e\u76f4\u63a5\u63a5\u5165 AdsPower \u53d1\u5e03 TikTok\u3002",
+    "longDescription": "H installs from GitHub and connects Kie generation with AdsPower TikTok publishing through one deterministic Chinese workflow. It supports recursive whole-folder concurrent generation, one-model processing, standalone publishing, and direct publishing of the videos just generated. First use scans and prepares Python, Node, Playwright, and XLSX support for Windows x64, Intel Mac, and Apple Silicon Mac. Publishing always checks and previews before the explicit FABU confirmation, uses exact numeric product PID matching, keeps one profile serial while running different profiles concurrently, and records per-account logs and screenshots.",
     "developerName": "XIAOH",
     "category": "Productivity",
     "capabilities": [
       "Image Editing",
       "Video Generation",
       "Text Generation",
-      "Batch Processing"
+      "Batch Processing",
+      "AdsPower Local API",
+      "TikTok Scheduling",
+      "TikTok Publishing"
     ],
     "defaultPrompt": [
       "\u4f7f\u7528 H \u6279\u91cf\u5904\u7406\u6574\u4e2a PID \u4ea7\u54c1\u6587\u4ef6\u5939\u3002",
       "\u4f7f\u7528 H \u5355\u72ec\u8c03\u7528\u4e00\u4e2a Kie \u6587\u672c\u3001\u56fe\u50cf\u6216\u89c6\u9891\u6a21\u578b\u3002",
-      "\u4f7f\u7528 H \u7ee7\u7eed\u5df2\u4fdd\u5b58\u7684 Kie \u751f\u6210\u4efb\u52a1\u3002"
+      "\u4f7f\u7528 H \u5c06\u521a\u751f\u6210\u7684\u89c6\u9891\u901a\u8fc7 AdsPower \u9884\u89c8\u5e76\u53d1\u5e03\u5230 TikTok\u3002",
+      "\u4f7f\u7528 H \u4ece XLSX/CSV \u8ba1\u5212\u8868\u72ec\u7acb\u6279\u91cf\u6392\u671f TikTok \u89c6\u9891\u3002"
     ],
     "brandColor": "#185E70",
     "composerIcon": "./assets/icon.png",

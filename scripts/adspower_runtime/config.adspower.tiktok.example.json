@@ -1,0 +1,30 @@
+{
+  "adspower": {
+    "apiBaseUrl": "http://127.0.0.1:50325",
+    "apiKey": "",
+    "profileId": "",
+    "groupId": "",
+    "openArgs": [],
+    "lastOpenedTabs": false,
+    "proxyDetection": false,
+    "closeWhenDone": false
+  },
+  "runtime": {
+    "concurrency": 3,
+    "headless": false,
+    "slowMoMs": 150,
+    "timeoutMs": 120000,
+    "artifactsDir": "artifacts/adspower-tiktok"
+  },
+  "platform": {
+    "name": "tiktok",
+    "uploadUrl": "https://www.tiktok.com/tiktokstudio/upload",
+    "flow": [
+      {
+        "type": "tiktokStudioPublish",
+        "url": "https://www.tiktok.com/tiktokstudio/upload",
+        "timeoutMs": 120000
+      }
+    ]
+  }
+}
