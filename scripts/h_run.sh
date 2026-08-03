@@ -6,11 +6,11 @@ export PYTHONIOENCODING=utf-8
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PORTABLE_LAUNCHER="$SCRIPT_DIR/../runtime/h_launcher"
 CODEX_HOME=${CODEX_HOME:-"$HOME/.codex"}
-RUNTIME_ID="portable-20260716153153"
+RUNTIME_ID="portable-20260803053917"
 GITHUB_RUNTIME_ROOT="$CODEX_HOME/cache/h/github-runtime/$RUNTIME_ID"
 GITHUB_RUNTIME_LAUNCHER="$GITHUB_RUNTIME_ROOT/runtime/h_launcher"
 GITHUB_RUNTIME_CORE="$GITHUB_RUNTIME_ROOT/runtime/h_core"
-RELEASE_BASE="https://github.com/xiaohuangzhengbang/codex-h-plugin/releases/download/v0.2.0-portable.20260716153153"
+RELEASE_BASE="https://github.com/xiaohuangzhengbang/codex-h-plugin/releases/download/v0.3.0-portable.20260803053917"
 
 if [ -f "$PORTABLE_LAUNCHER" ]; then
   chmod +x "$PORTABLE_LAUNCHER"
@@ -35,12 +35,12 @@ download_github_runtime() {
     arm64)
       ASSET="H-Codex-Plugin-macOS-Apple-Silicon.zip"
       PACKAGE_ROOT="H-Codex-Plugin-macOS-Apple-Silicon"
-      EXPECTED_SHA256="1681496aca685912a8728284f956bdd292121cce77e00302b92dbe8981c489ea"
+      EXPECTED_SHA256="c430757bfce2bd8068e02462e755276fbc918b411283bcd883f8733c2d9d4da7"
       ;;
     x86_64)
       ASSET="H-Codex-Plugin-macOS-Intel.zip"
       PACKAGE_ROOT="H-Codex-Plugin-macOS-Intel"
-      EXPECTED_SHA256="ce4e0fb9e5da5964946b3a8d3d5c95797c19d62819fa4fa669c75dfb1efd74e1"
+      EXPECTED_SHA256="53feebfac7dc5eeb2b5b2746f1f7d9c93de9e897abad9a8f0e1987f54f5f803c"
       ;;
     *)
       echo "H bootstrap: unsupported Mac architecture: $(uname -m)" >&2

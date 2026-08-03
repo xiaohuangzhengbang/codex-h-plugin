@@ -281,7 +281,7 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "Get-FileHash" not in windows
     assert "H_FORCE_GITHUB_RUNTIME" in windows
     assert "H-Codex-Plugin-Windows-x64.zip" in windows
-    assert "82a09fce5278714f8e968b2c92a907d00d0600d8235cb5f45444862f6b12c10e" in windows
+    assert "b3a1f06121d2ec643f239a5088f3ee69481ebb233e01e900780b3a16465456c7" in windows
     assert "Python.Python.3.12" in windows
     assert "winget.exe" in windows
     assert "powershell.exe" in command
@@ -291,8 +291,8 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "H_FORCE_GITHUB_RUNTIME" in shell
     assert "H-Codex-Plugin-macOS-Apple-Silicon.zip" in shell
     assert "H-Codex-Plugin-macOS-Intel.zip" in shell
-    assert "1681496aca685912a8728284f956bdd292121cce77e00302b92dbe8981c489ea" in shell
-    assert "ce4e0fb9e5da5964946b3a8d3d5c95797c19d62819fa4fa669c75dfb1efd74e1" in shell
+    assert "c430757bfce2bd8068e02462e755276fbc918b411283bcd883f8733c2d9d4da7" in shell
+    assert "53feebfac7dc5eeb2b5b2746f1f7d9c93de9e897abad9a8f0e1987f54f5f803c" in shell
     assert "curl -fL --retry 3" in shell
     assert "shasum -a 256" in shell
     assert "/opt/homebrew/bin/brew" in shell
