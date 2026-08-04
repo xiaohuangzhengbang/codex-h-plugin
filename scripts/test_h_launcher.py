@@ -179,6 +179,36 @@ def test_empty_or_bom_only_keys_are_not_detected():
     assert launcher.secret_present("valid-key-value")
 
 
+def test_fastmoss_rejects_a_kie_key_saved_in_the_wrong_slot():
+    launcher = load_launcher()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        originals = {
+            "USER_KEY_FILE": launcher.USER_KEY_FILE,
+            "FASTMOSS_KEY_FILE": launcher.FASTMOSS_KEY_FILE,
+            "LOCAL_KEY_FILE": launcher.LOCAL_KEY_FILE,
+        }
+        environment = {name: os.environ.pop(name, None) for name in ("H_KIE_API_KEY", "KIE_API_KEY", "H_FASTMOSS_API_KEY", "FASTMOSS_API_KEY")}
+        launcher.USER_KEY_FILE = root / "h_kie_api_key.txt"
+        launcher.FASTMOSS_KEY_FILE = root / "h_fastmoss_api_key.txt"
+        launcher.LOCAL_KEY_FILE = root / ".h_api_key"
+        launcher.USER_KEY_FILE.write_text("shared-test-key", encoding="utf-8")
+        launcher.FASTMOSS_KEY_FILE.write_text("shared-test-key", encoding="utf-8")
+        try:
+            try:
+                launcher.fastmoss_api_key()
+                raise AssertionError("cross-service credential reuse was accepted")
+            except launcher.FastMossError as exc:
+                assert exc.category == "authentication"
+                assert "wrong key slot" in str(exc)
+        finally:
+            for name, value in originals.items():
+                setattr(launcher, name, value)
+            for name, value in environment.items():
+                if value is not None:
+                    os.environ[name] = value
+
+
 def test_packaged_runtime_skips_python_command_shape():
     launcher = load_launcher()
     report = launcher.BootstrapReport(

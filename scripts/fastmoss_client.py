@@ -102,6 +102,7 @@ def normalize_pids(values: list[str]) -> list[str]:
 
 def _business_category(code: int) -> str:
     return {
+        1002: "authentication",
         10001: "validation",
         20001: "not_found",
         30001: "permission",
