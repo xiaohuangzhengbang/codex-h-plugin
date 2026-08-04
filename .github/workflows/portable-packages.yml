@@ -37,7 +37,6 @@ jobs:
         run: |
           $package = Get-ChildItem -LiteralPath portable-dist -Filter '*.zip' -File | Select-Object -First 1
           $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'h-github-runtime-bootstrap'
-          $env:H_FORCE_GITHUB_RUNTIME = '1'
           $env:H_RUNTIME_PACKAGE_PATH = $package.FullName
           $env:H_RUNTIME_PACKAGE_SHA256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
           scripts\h_run.cmd protocol mode
@@ -49,7 +48,6 @@ jobs:
         run: |
           package=$(find portable-dist -maxdepth 1 -type f -name '*.zip' -print -quit)
           export CODEX_HOME="$RUNNER_TEMP/h-github-runtime-bootstrap"
-          export H_FORCE_GITHUB_RUNTIME=1
           export H_RUNTIME_PACKAGE_PATH="$package"
           export H_RUNTIME_PACKAGE_SHA256=$(shasum -a 256 "$package" | awk '{print $1}')
           ./scripts/h_run.sh protocol mode
