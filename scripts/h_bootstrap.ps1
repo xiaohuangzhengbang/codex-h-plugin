@@ -11,14 +11,14 @@ $CodexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
 else {
     $env:CODEX_HOME
 }
-$RuntimeId = "portable-20260804031849"
+$RuntimeId = "portable-20260804034742"
 $RuntimeRoot = Join-Path $CodexHome "cache\h\github-runtime\$RuntimeId"
 $RuntimeLauncher = Join-Path $RuntimeRoot "runtime\h_launcher.exe"
 $RuntimeCore = Join-Path $RuntimeRoot "runtime\h_core.exe"
 $RuntimeAsset = "H-Codex-Plugin-Windows-x64.zip"
 $RuntimePackageRoot = "H-Codex-Plugin-Windows-x64"
-$RuntimeUrl = "https://github.com/xiaohuangzhengbang/codex-h-plugin/releases/download/v0.4.0-portable.20260804031849/$RuntimeAsset"
-$RuntimeSha256 = "8a8d07118a1b8e1859bd605973a77aededa7cb03af83fb5e967e07eafbd7bdf4"
+$RuntimeUrl = "https://github.com/xiaohuangzhengbang/codex-h-plugin/releases/download/v0.4.1-portable.20260804034742/$RuntimeAsset"
+$RuntimeSha256 = "a487e3ea348fd8695f0a228b90ac9d2908ee025ae13ef1cd989e0fa458164fb0"
 
 function Test-HPython {
     param(

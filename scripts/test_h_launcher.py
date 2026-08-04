@@ -406,10 +406,10 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "System.Security.Cryptography.SHA256" in windows
     assert "Get-FileHash" not in windows
     assert "H_FORCE_GITHUB_RUNTIME" in windows
-    assert "portable-20260804031849" in windows
-    assert "v0.4.0-portable.20260804031849" in windows
+    assert "portable-20260804034742" in windows
+    assert "v0.4.1-portable.20260804034742" in windows
     assert "H-Codex-Plugin-Windows-x64.zip" in windows
-    assert "8a8d07118a1b8e1859bd605973a77aededa7cb03af83fb5e967e07eafbd7bdf4" in windows
+    assert "a487e3ea348fd8695f0a228b90ac9d2908ee025ae13ef1cd989e0fa458164fb0" in windows
     assert "Python.Python.3.12" in windows
     assert "winget.exe" in windows
     assert "powershell.exe" in command
@@ -417,12 +417,12 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "codex-runtimes" in shell
     assert "github-runtime" in shell
     assert "H_FORCE_GITHUB_RUNTIME" in shell
-    assert "portable-20260804031849" in shell
-    assert "v0.4.0-portable.20260804031849" in shell
+    assert "portable-20260804034742" in shell
+    assert "v0.4.1-portable.20260804034742" in shell
     assert "H-Codex-Plugin-macOS-Apple-Silicon.zip" in shell
     assert "H-Codex-Plugin-macOS-Intel.zip" in shell
-    assert "2fa491274d7f340157582936e2de08661b923abb9deea417bcda516e1a707ec3" in shell
-    assert "e9492a49991b1d1f499634dc60f7e041176fb31e2dd61e5807e9694cb5220604" in shell
+    assert "3c541a99ad022f6b64a27abeadccdee30aa76c8626caa4667151d4c298a2e186" in shell
+    assert "661b960d8178fab12acaad647bfa23815a2b107730a439308b1a2d32d40faf5c" in shell
     assert "curl -fL --retry 3" in shell
     assert "shasum -a 256" in shell
     assert "/opt/homebrew/bin/brew" in shell

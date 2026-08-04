@@ -42,7 +42,7 @@ jobs:
           $env:H_RUNTIME_PACKAGE_SHA256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
           scripts\h_run.cmd protocol mode
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path -LiteralPath (Join-Path $env:CODEX_HOME 'cache\h\github-runtime\portable-20260804031849\runtime\h_launcher.exe'))) { throw 'GitHub runtime launcher was not cached.' }
+          if (-not (Test-Path -LiteralPath (Join-Path $env:CODEX_HOME 'cache\h\github-runtime\portable-20260804034742\runtime\h_launcher.exe'))) { throw 'GitHub runtime launcher was not cached.' }
       - name: Exercise GitHub runtime bootstrap on macOS
         if: runner.os == 'macOS'
         shell: bash
@@ -53,7 +53,7 @@ jobs:
           export H_RUNTIME_PACKAGE_PATH="$package"
           export H_RUNTIME_PACKAGE_SHA256=$(shasum -a 256 "$package" | awk '{print $1}')
           ./scripts/h_run.sh protocol mode
-          test -x "$CODEX_HOME/cache/h/github-runtime/portable-20260804031849/runtime/h_launcher"
+          test -x "$CODEX_HOME/cache/h/github-runtime/portable-20260804034742/runtime/h_launcher"
       - name: Upload portable package
         uses: actions/upload-artifact@v4
         with:
