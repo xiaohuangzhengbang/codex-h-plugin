@@ -144,11 +144,10 @@ if runtime_ready; then
   start_github_runtime "github-runtime-cache" "$@"
 fi
 
-if [ "${H_FORCE_GITHUB_RUNTIME:-0}" = "1" ]; then
-  if download_github_runtime; then
-    start_github_runtime "github-runtime-download" "$@"
-  fi
+if download_github_runtime; then
+  start_github_runtime "github-runtime-download" "$@"
 fi
+echo "H bootstrap: GitHub runtime download failed; trying a Python fallback." >&2
 
 python_supported() {
   "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
@@ -184,10 +183,6 @@ if command -v python >/dev/null 2>&1 && python_supported "$(command -v python)";
   exec "$(command -v python)" "$SCRIPT_DIR/h_run.py" "$@"
 fi
 
-if download_github_runtime; then
-  start_github_runtime "github-runtime-download" "$@"
-fi
-
 BREW=""
 if command -v brew >/dev/null 2>&1; then
   BREW=$(command -v brew)
@@ -208,5 +203,5 @@ if [ -n "$BREW" ]; then
   fi
 fi
 
-printf '%s\n' '{"ready":false,"state":"setup-error","error_category":"runtime","display_text":"H 无法从 GitHub 准备运行环境，请检查网络后重试；尚未提交任何 Kie 任务。"}'
+printf '%s\n' '{"ready":false,"state":"setup-error","error_category":"runtime","display_text":"H \u65e0\u6cd5\u4ece GitHub \u51c6\u5907\u8fd0\u884c\u73af\u5883\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5\uff1b\u5c1a\u672a\u63d0\u4ea4\u4efb\u4f55 Kie \u4efb\u52a1\u3002"}'
 exit 0
