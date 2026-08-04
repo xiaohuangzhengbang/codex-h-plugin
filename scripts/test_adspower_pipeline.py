@@ -75,13 +75,13 @@ def test_generated_results_become_a_valid_round_robin_publish_plan():
         assert all("bad.mp4" not in row["视频路径"] for row in rows)
         assert result["mappings"] == [
             {
-                "video": str(video_dir / "123456.mp4"),
+                "video": str((video_dir / "123456.mp4").resolve()),
                 "pid": "123456",
                 "profile": "27",
                 "scheduled_at": "2026-08-04 10:30",
             },
             {
-                "video": str(video_dir / "789012.mp4"),
+                "video": str((video_dir / "789012.mp4").resolve()),
                 "pid": "789012",
                 "profile": "28",
                 "scheduled_at": "2026-08-04 11:00",
