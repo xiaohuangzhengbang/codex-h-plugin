@@ -1,0 +1,4 @@
+interface:
+  display_name: "H PID"
+  short_description: "按 PID 拉主图标题并生成发布"
+  default_prompt: "使用 H 根据商品 PID 拉取 FastMoss 主图和标题，联合分析后生成视频，并按原 PID 准备发布。"

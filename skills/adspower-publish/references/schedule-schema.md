@@ -9,7 +9,7 @@
 | `视频路径` / `videoPath` | 是 | 本地视频绝对路径 |
 | `文案` / `caption` | 否 | TikTok 正文 |
 | `标签` / `hashtags` | 否 | 空格分隔的标签，程序会与正文合并 |
-| `商品PID` / `productPid` | 否 | TikTok Shop 完整数字 PID；插件只按 PID 精确搜索并挂车 |
+| `商品PID` / `productPid` | 挂车时必填 | TikTok Shop 完整数字 PID；必须与视频文件名及生成记录 PID 完全一致，插件只按 PID 精确搜索并挂车 |
 | `预定时间` / `scheduledAt` | 是 | Excel日期时间或 `YYYY-MM-DD HH:mm` |
 | `时区` / `timezone` | 建议 | IANA 时区，如 `America/Mexico_City`；`预定时间` 按该 AdsPower 账号 TikTok Studio 显示的本地时间填写 |
 | `发布模式` | 是 | `schedule` 正式排期，`draft` 只填写不提交 |
@@ -25,3 +25,5 @@ yes,27,C:/Videos/a.mp4,夏季清凉好物,#TikTokShop #Summer,2026-08-01 10:30
 CSV 中包含逗号的文案必须使用双引号包围。
 
 `preview` 会上传并填写计划，但不会点击最终 Schedule/Post。正式发布必须在同一计划预览成功后输入 `FABU`。同一环境内任务串行，不同环境并发；登录、验证码或风控只停止对应环境。
+
+H 自动建表时，相邻发布时间只允许相差 30 分钟的正整数倍。启用 `--attach-pid` 后，任一视频缺少数字 PID 或文件名与记录 PID 不一致都会拒绝整张计划表。

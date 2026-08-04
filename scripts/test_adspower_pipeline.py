@@ -30,7 +30,7 @@ def plan_args(video_root: Path, **overrides):
         "video_root": str(video_root),
         "profile_no": ["27", "28"],
         "start_at": "2026-08-04 10:30",
-        "interval_minutes": 45,
+        "interval_minutes": 30,
         "caption_template": "商品 {pid} 第 {index} 条 {filename}",
         "hashtags": "#TikTokShop #Menswear",
         "timezone": "Asia/Shanghai",
@@ -70,9 +70,23 @@ def test_generated_results_become_a_valid_round_robin_publish_plan():
             rows = list(csv.DictReader(handle))
         assert [row["环境编号"] for row in rows] == ["27", "28"]
         assert [row["商品PID"] for row in rows] == ["123456", "789012"]
-        assert [row["预定时间"] for row in rows] == ["2026-08-04 10:30", "2026-08-04 11:15"]
+        assert [row["预定时间"] for row in rows] == ["2026-08-04 10:30", "2026-08-04 11:00"]
         assert "商品 123456 第 1 条 123456.mp4" == rows[0]["文案"]
         assert all("bad.mp4" not in row["视频路径"] for row in rows)
+        assert result["mappings"] == [
+            {
+                "video": str(video_dir / "123456.mp4"),
+                "pid": "123456",
+                "profile": "27",
+                "scheduled_at": "2026-08-04 10:30",
+            },
+            {
+                "video": str(video_dir / "789012.mp4"),
+                "pid": "789012",
+                "profile": "28",
+                "scheduled_at": "2026-08-04 11:00",
+            },
+        ]
 
 
 def test_fake_mp4_is_rejected_before_a_publish_plan_is_created():
@@ -94,11 +108,50 @@ def test_non_numeric_pid_is_never_used_for_product_attachment():
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir) / "videos"
         write_mp4(root / "lookbook-front.mp4")
-        result = launcher.create_adspower_plan(plan_args(root, profile_no=["27"]), Path(temp_dir) / "publish")
-        assert result["skipped_non_numeric_pids"] == ["lookbook-front"]
-        with Path(result["plan"]).open("r", encoding="utf-8-sig", newline="") as handle:
-            row = next(csv.DictReader(handle))
-        assert row["商品PID"] == ""
+        try:
+            launcher.create_adspower_plan(plan_args(root, profile_no=["27"]), Path(temp_dir) / "publish")
+        except ValueError as exc:
+            assert "exact numeric PID" in str(exc)
+            assert "lookbook-front" in str(exc)
+        else:
+            raise AssertionError("A non-numeric PID entered a product-attachment plan")
+
+
+def test_manifest_pid_must_match_video_filename_before_attachment():
+    launcher = load_launcher()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir) / "result"
+        text_dir = root / "文本"
+        video = root / "视频" / "123456.mp4"
+        text_dir.mkdir(parents=True)
+        write_mp4(video)
+        (text_dir / "record.json").write_text(
+            json.dumps({"state": "success", "pid": "999999", "video_path": str(video)}),
+            encoding="utf-8",
+        )
+        try:
+            launcher.create_adspower_plan(plan_args(root), Path(temp_dir) / "publish")
+        except ValueError as exc:
+            assert "same exact numeric PID" in str(exc)
+            assert "123456.mp4 -> 999999" in str(exc)
+        else:
+            raise AssertionError("A mismatched manifest PID entered a product-attachment plan")
+
+
+def test_schedule_interval_must_use_half_hour_steps():
+    launcher = load_launcher()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir) / "videos"
+        write_mp4(root / "123456.mp4")
+        try:
+            launcher.create_adspower_plan(
+                plan_args(root, interval_minutes=45),
+                Path(temp_dir) / "publish",
+            )
+        except ValueError as exc:
+            assert "multiple of 30 minutes" in str(exc)
+        else:
+            raise AssertionError("A non-half-hour schedule interval was accepted")
 
 
 def test_csv_plan_is_safely_parsed_into_preview_and_publish_tasks():

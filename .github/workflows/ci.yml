@@ -44,6 +44,7 @@ jobs:
       - name: Run regression tests
         run: |
           python scripts/test_h_launcher.py
+          python scripts/test_fastmoss_api.py
           python scripts/test_adspower_pipeline.py
           python scripts/test_kie_result_url.py
       - name: Validate AdsPower JavaScript runtime

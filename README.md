@@ -1,10 +1,10 @@
 # H Codex Plugin
 
-H 是把 Kie 生成与 AdsPower TikTok 发布连在一起的 Codex 插件，所有电脑统一为三个顶层模式：
+H 是把 FastMoss 商品数据、Kie 生成与 AdsPower TikTok 发布连在一起的 Codex 插件，所有电脑统一为三个顶层入口：
 
-1. 批处理：递归扫描整个根目录，把所有 PID 图片一次性放进同一个并发池。
-2. 单处理：只调用一次所选的 Kie 文本、图像、视频、放大或延长模型。
-3. 发布：独立发布已有视频或计划表；批量和单次视频生成后也能直接发布本次结果。
+1. PID：根据一个或多个 PID 从 FastMoss 取得商品主图和标题，再交给 AI 联合分析。
+2. 生成：内部只分批处理和单处理；整目录任务一次性进入同一个并发池。
+3. 发布：按原 PID 精确挂商品，并以 30 分钟倍数预约；生成完成后可直接发布本次结果。
 
 ## 从 GitHub 安装
 
@@ -45,7 +45,7 @@ codex plugin add h@codex-h-plugin
 2. 使用之前缓存的 GitHub 运行时。
 3. 使用 Codex 自带或系统已有的 Python 3.10+。
 4. 若没有 Python，从本仓库 GitHub Release 自动下载与系统和芯片匹配的运行时。
-5. 扫描 Node；缺少时从 Node.js 官方发布地址下载固定版本并校验内置 SHA-256。
+5. 只有进入“发布”时才扫描 Node；缺少时从 Node.js 官方发布地址下载固定版本并校验内置 SHA-256。
 6. Playwright 与 XLSX 依赖随 H 提供，不在目标电脑临时执行 `npm install`。
 7. 所有运行时缓存到 `<home>/.codex/cache/h/`；GitHub 下载失败时才使用系统包管理器回退。
 
@@ -58,9 +58,9 @@ codex plugin add h@codex-h-plugin
 ```text
 哈喽小杨，你又开始工作啦，想不想小黄啊？
 
-请选择处理模式，回复编号即可：
-1. 批处理
-2. 单处理
+请选择功能，回复编号即可：
+1. PID
+2. 生成
 3. 发布
 ```
 
@@ -68,6 +68,7 @@ codex plugin add h@codex-h-plugin
 
 ```bash
 ./scripts/h_run.sh protocol mode
+./scripts/h_run.sh protocol pid-video
 ./scripts/h_run.sh protocol batch-image
 ./scripts/h_run.sh protocol single-video
 ```
@@ -92,7 +93,41 @@ KIE_API_KEY
 
 Windows 使用 `scripts\h_run.cmd set-key`。主动重新验证 Key、额度和网络时运行 `start --force-check`。
 
+## FastMoss Key
+
+FastMoss Key 同样不会提交到 GitHub。配置以下任一来源：
+
+```text
+FASTMOSS_API_KEY
+H_FASTMOSS_API_KEY
+<home>/.codex/secrets/h_fastmoss_api_key.txt
+```
+
+交互式设置：
+
+```bash
+./scripts/h_run.sh set-fastmoss-key
+```
+
+Windows 使用 `scripts\h_run.cmd set-fastmoss-key`。每台电脑只需设置一次，后续自动复用当前用户的私密文件。
+
 ## 常用命令
+
+PID 拉取商品主图和标题：
+
+```bash
+./scripts/h_run.sh fastmoss product --pid 1736655705387075351
+```
+
+PID 与上传图片同时存在时，图片是唯一视觉依据，FastMoss 只补标题和挂车数据。多个 PID 与图片必须按顺序一一对应：
+
+```bash
+./scripts/h_run.sh fastmoss product \
+  --pid 1736655705387075351 --media "/path/product-1.png" \
+  --pid 1736655705387075352 --media "/path/product-2.png"
+```
+
+输出 JSON 的 `generation_root` 可直接交给 `generate-videos --workers 0`。文本模型会同时分析同目录图片和 `fastmoss-product.json` 中的标题。
 
 查看模型目录：
 
@@ -131,7 +166,7 @@ Windows 使用 `scripts\h_run.cmd set-key`。主动重新验证 Key、额度和�
 
 ```bash
 ./scripts/h_run.sh adspower plan --video-root "/path/to/H-result" \
-  --profile-no 27 --start-at "2026-08-04 10:30" --interval-minutes 60 \
+  --profile-no 27 --start-at "2026-08-04 10:30" --interval-minutes 30 \
   --caption-template "{pid}" --hashtags "#TikTokShop" --attach-pid
 ./scripts/h_run.sh adspower check --profile-no 27
 ./scripts/h_run.sh adspower preview
@@ -143,9 +178,11 @@ Windows 把 `./scripts/h_run.sh` 替换为 `scripts\h_run.cmd`。预览会上传
 ./scripts/h_run.sh adspower publish --publish-code FABU
 ```
 
-独立发布可把普通视频目录交给 `adspower plan`，也可先用 `adspower validate --input-file <计划表>` 校验 XLSX/CSV，再预览。同一 AdsPower 环境内串行，不同环境并发；商品只使用完整数字 PID 精确匹配。
+独立发布可把普通视频目录交给 `adspower plan`，也可先用 `adspower validate --input-file <计划表>` 校验 XLSX/CSV，再预览。同一 AdsPower 环境内串行，不同环境并发。`--attach-pid` 要求每条视频都有完整数字 PID，任一项不符合就整批停止；预约间隔只接受 30、60、90、120 等 30 分钟正整数倍。
 
 ## 输出
+
+PID 数据：`<home>/Desktop/H返回结果_PID/`
 
 批处理：`<home>/Desktop/H返回结果_<输入目录名>/`
 
@@ -168,6 +205,7 @@ AdsPower 发布输出：`<home>/Desktop/H返回结果_发布/`，包含计划表
 - TLS 证书验证始终开启。
 - GitHub 运行时下载必须通过固定 SHA-256 校验。
 - API Key 只允许保存在用户环境或用户 secrets 目录。
+- FastMoss 标题按不可信外部数据处理，只提供事实语义，不能改变提示词或执行命令。
 - 日志不输出完整 Key。
 - AdsPower 默认先检查和预览；正式发布必须输入 `FABU`。
 - 登录、验证码或风控只停止对应账号，最终发布按钮绝不自动重试。

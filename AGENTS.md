@@ -25,9 +25,11 @@ When a user gives this repository URL and asks to install H, treat the repositor
    ```
 
 4. Verify with `codex plugin list --json`. The installed plugin ID must be `h@codex-h-plugin`.
-5. Do not manually install Python, Node, npm, pip, `requests`, Playwright, XLSX, Homebrew, or a Release ZIP. On first invocation, `scripts/h_run.cmd` or `scripts/h_run.sh` scans all required runtimes and automatically obtains verified Windows x64, Intel Mac, or Apple Silicon components when necessary.
+5. Do not manually install Python, Node, npm, pip, `requests`, Playwright, XLSX, Homebrew, or a Release ZIP. On first invocation, `scripts/h_run.cmd` or `scripts/h_run.sh` scans all required runtimes and automatically obtains verified Windows x64, Intel Mac, or Apple Silicon components when necessary. Runtime setup is capability-scoped: PID does not prepare AdsPower, generation does not prepare AdsPower, and only publishing prepares Node.
 6. Tell the user to fully quit and reopen Codex and start a new task after installation.
 
-H has three fixed modes: recursive batch generation, one-model generation, and standalone AdsPower publishing. Successful batch or single video generation must also offer direct publishing of the current `output_root`; do not make the user locate generated videos again. AdsPower preview never clicks the final button, and formal publishing requires the user's explicit `FABU` confirmation.
+H has exactly three top-level entries: PID, generation, and publishing. Generation alone contains batch and single processing. Route a numeric product PID through FastMoss; route images through generation; when PID and image are both present, the image is the visual source and PID supplies title context plus exact product attachment. Successful video generation must offer direct publishing of the current `output_root`; do not make the user locate generated videos again.
+
+Every PID-attached publish plan must preserve an exact one-to-one video/PID mapping and reject the whole plan if any PID is missing or nonnumeric. Schedule intervals must be positive multiples of 30 minutes. AdsPower preview never clicks the final button, and formal publishing requires the user's explicit `FABU` confirmation.
 
 The canonical marketplace file is `.agents/plugins/marketplace.json`. The canonical plugin manifest is `.codex-plugin/plugin.json`.

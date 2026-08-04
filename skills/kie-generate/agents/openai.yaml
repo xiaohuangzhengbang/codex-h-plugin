@@ -1,0 +1,4 @@
+interface:
+  display_name: "H 生成"
+  short_description: "批量或单次调用 Kie 生成"
+  default_prompt: "使用 H 对这些图片或整个文件夹进行批处理或单处理，并发生成所选图像或视频结果。"

@@ -67,7 +67,9 @@ def sample_catalog():
 
 def test_fixed_protocol_menus():
     launcher = load_launcher()
-    assert launcher.protocol_display("mode", {}) == "请选择处理模式，回复编号即可：\n1. 批处理\n2. 单处理\n3. 发布"
+    assert launcher.protocol_display("mode", {}) == "请选择功能，回复编号即可：\n1. PID\n2. 生成\n3. 发布"
+    assert launcher.protocol_display("generate-mode", {}) == "请选择生成方式，回复编号即可：\n1. 批处理\n2. 单处理"
+    assert "FastMoss" in launcher.protocol_display("pid", {})
     assert launcher.protocol_display("single-kind", {}) == "请选择单处理类型，回复编号即可：\n1. 文本\n2. 图像\n3. 视频"
 
     image_menu = launcher.protocol_display("batch-image", sample_catalog())
@@ -89,6 +91,10 @@ def test_fixed_protocol_menus():
     assert "发布本次生成的视频" in launcher.protocol_display("post-single-video", {})
     assert "H 已生成的视频结果" in launcher.protocol_display("publish-source", {})
     assert "输入 FABU 正式发布" in launcher.protocol_display("publish-confirm", {})
+    assert "AI 分析文本模型" in launcher.protocol_display("pid-video", sample_catalog())
+    publish_plan = launcher.protocol_display("publish-plan", {})
+    assert "30 分钟" in publish_plan
+    assert "PID 视频必须挂同一个完整数字 PID" in publish_plan
 
 
 def test_no_arguments_defaults_to_start():
@@ -100,7 +106,14 @@ def test_no_arguments_defaults_to_start():
         assert launcher.main([]) == 17
     finally:
         launcher.start = original
-    assert calls == [{"offline": False, "force_check": False, "forwarded_args": []}]
+    assert calls == [
+        {
+            "offline": False,
+            "force_check": False,
+            "capability": "menu",
+            "forwarded_args": [],
+        }
+    ]
 
 
 def test_adspower_command_reexecs_inside_the_prepared_private_python():
@@ -124,6 +137,29 @@ def test_adspower_command_reexecs_inside_the_prepared_private_python():
         launcher.subprocess.call = originals["subprocess_call"]
     assert calls[0][0][0] == report.python
     assert calls[0][0][-2:] == ["adspower", "runtime"]
+
+
+def test_fastmoss_command_reexecs_inside_the_prepared_private_python():
+    launcher = load_launcher()
+    report = launcher.BootstrapReport(
+        python=str(Path(sys.executable).with_name("h-private-python")),
+        environment_created=False,
+        dependencies_installed=False,
+        missing_before=[],
+        marker_was_current=True,
+        runtime_source="test-python",
+    )
+    calls = []
+    originals = {"bootstrap": launcher.bootstrap, "subprocess_call": launcher.subprocess.call}
+    launcher.bootstrap = lambda: report
+    launcher.subprocess.call = lambda command, **kwargs: calls.append((command, kwargs)) or 29
+    try:
+        assert launcher.main(["fastmoss", "status"]) == 29
+    finally:
+        launcher.bootstrap = originals["bootstrap"]
+        launcher.subprocess.call = originals["subprocess_call"]
+    assert calls[0][0][0] == report.python
+    assert calls[0][0][-2:] == ["fastmoss", "status"]
 
 
 def test_dependency_scanner_detects_missing_imports():
@@ -246,6 +282,7 @@ def test_start_attributes_api_failure_without_submitting_work():
     launcher.local_checks = lambda *_args, **_kwargs: {
         "desktop_writable": True,
         "kie_key_sources": ["test-key-source"],
+        "fastmoss_key_sources": [],
     }
     launcher.ready_cache_valid = lambda: False
     launcher.ensure_adspower_runtime = lambda **_kwargs: {"ready": True, "source": "test"}
@@ -257,7 +294,7 @@ def test_start_attributes_api_failure_without_submitting_work():
     try:
         output = io.StringIO()
         with redirect_stdout(output):
-            assert launcher.start(force_check=True) == 0
+            assert launcher.start(force_check=True, capability="generate") == 0
     finally:
         for name, value in originals.items():
             setattr(launcher, name, value)
@@ -266,6 +303,94 @@ def test_start_attributes_api_failure_without_submitting_work():
     assert payload["error_category"] == "authentication"
     assert "Kie 密钥无效或已失效" in payload["display_text"]
     assert "不会提交任何生成任务" in payload["display_text"]
+
+
+def test_start_menu_does_not_require_kie_or_fastmoss_keys():
+    launcher = load_launcher()
+    report = launcher.BootstrapReport(
+        python=sys.executable,
+        environment_created=False,
+        dependencies_installed=False,
+        missing_before=[],
+        marker_was_current=True,
+        runtime_source="test",
+    )
+    originals = {
+        "bootstrap": launcher.bootstrap,
+        "local_checks": launcher.local_checks,
+        "ensure_adspower_runtime": launcher.ensure_adspower_runtime,
+    }
+    launcher.bootstrap = lambda: report
+    launcher.local_checks = lambda *_args, **_kwargs: {
+        "desktop_writable": True,
+        "kie_key_sources": [],
+        "fastmoss_key_sources": [],
+    }
+    adspower_calls = []
+    launcher.ensure_adspower_runtime = lambda **_kwargs: adspower_calls.append(True) or {
+        "ready": True,
+        "source": "test",
+    }
+    try:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            assert launcher.start(capability="menu") == 0
+    finally:
+        for name, value in originals.items():
+            setattr(launcher, name, value)
+    payload = launcher.parse_last_json(output.getvalue())
+    assert payload["ready"] is True
+    assert payload["state"] == "mode"
+    assert "1. PID" in payload["display_text"]
+    assert payload["checks"]["adspower_runtime"]["skipped"] is True
+    assert adspower_calls == []
+
+
+def test_pid_uploaded_images_require_exact_one_to_one_mapping():
+    launcher = load_launcher()
+    pids = ["10000000001", "10000000002"]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        first = Path(temp_dir) / "first.png"
+        second = Path(temp_dir) / "second.jpg"
+        first.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+        second.write_bytes(b"\xff\xd8\xffimage")
+        mapping = launcher.map_pid_reference_images(pids, [str(first), str(second)])
+        assert mapping == {pids[0]: first.resolve(), pids[1]: second.resolve()}
+        try:
+            launcher.map_pid_reference_images(pids, [str(first)])
+            raise AssertionError("mismatched PID and image counts were accepted")
+        except launcher.FastMossError as exc:
+            assert exc.category == "validation"
+
+
+def test_pid_capability_requires_only_fastmoss_key():
+    launcher = load_launcher()
+    report = launcher.BootstrapReport(
+        python=sys.executable,
+        environment_created=False,
+        dependencies_installed=False,
+        missing_before=[],
+        marker_was_current=True,
+        runtime_source="test",
+    )
+    originals = {"bootstrap": launcher.bootstrap, "local_checks": launcher.local_checks}
+    launcher.bootstrap = lambda: report
+    launcher.local_checks = lambda *_args, **_kwargs: {
+        "desktop_writable": True,
+        "kie_key_sources": [],
+        "fastmoss_key_sources": ["test-fastmoss-key"],
+    }
+    try:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            assert launcher.start(capability="pid") == 0
+    finally:
+        for name, value in originals.items():
+            setattr(launcher, name, value)
+    payload = launcher.parse_last_json(output.getvalue())
+    assert payload["ready"] is True
+    assert payload["state"] == "pid"
+    assert "FastMoss" in payload["display_text"]
 
 
 def test_cross_platform_bootstrap_sources_are_present():
@@ -311,6 +436,7 @@ def test_adspower_runtime_is_bundled_and_node_downloads_are_pinned():
     assert not (PLUGIN_ROOT / "scripts" / "adspower_runtime" / "node_modules" / "xlsx").exists()
     build_source = (SCRIPT_DIR / "build_portable.py").read_text(encoding="utf-8")
     assert 'PAYLOAD_SCRIPT_DIRECTORIES = ["adspower_runtime"]' in build_source
+    assert '"fastmoss_client.py"' in build_source
     assert 'collect_packages=("openpyxl",)' in build_source
 
 
@@ -378,6 +504,36 @@ def test_github_marketplace_install_contract():
         assert "plugin add h@codex-h-plugin" in document
     assert "Do not redirect the user to a ZIP package" in agents
     assert "WindowsApps" in agents
+
+
+def test_plugin_ui_has_exactly_pid_generation_and_publish_entries():
+    manifest = json.loads(
+        (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    prompts = manifest["interface"]["defaultPrompt"]
+    assert len(prompts) == 3
+    assert "PID" in prompts[0] and "FastMoss" in prompts[0]
+    assert "批处理或单处理" in prompts[1]
+    assert "30 分钟" in prompts[2] and "原 PID" in prompts[2]
+    assert manifest["interface"]["displayName"] == "H · PID / 生成 / 发布"
+
+    skill_names = {
+        path.parent.name
+        for path in (PLUGIN_ROOT / "skills").glob("*/SKILL.md")
+    }
+    assert {"h", "fastmoss-pid", "kie-generate", "adspower-publish"} <= skill_names
+    fastmoss_ui = (PLUGIN_ROOT / "skills" / "fastmoss-pid" / "agents" / "openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    generate_ui = (PLUGIN_ROOT / "skills" / "kie-generate" / "agents" / "openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    publish_ui = (PLUGIN_ROOT / "skills" / "adspower-publish" / "agents" / "openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert 'display_name: "H PID"' in fastmoss_ui
+    assert 'display_name: "H 生成"' in generate_ui
+    assert 'display_name: "H 发布"' in publish_ui
 
 
 def test_user_facing_files_are_valid_utf8_chinese():

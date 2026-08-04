@@ -32,7 +32,9 @@ The installed source plugin does not assume that Python, Node, npm, pip, Homebre
 
 The platform launcher first reuses an existing compatible environment. If Python is missing, it downloads the matching Windows x64, Intel Mac, or Apple Silicon runtime from this repository's GitHub Release and verifies its pinned SHA-256 digest. It also scans Node and, when missing, downloads a pinned Node.js LTS archive for the same platform and verifies a built-in SHA-256 digest. Playwright and XLSX packages ship with H. All reusable files are cached under `~/.codex/cache/h`; Homebrew and winget are last-resort fallbacks only.
 
-After Kie video generation, H can create an AdsPower schedule directly from the successful result manifest, run a no-final-click preview, and publish only after the explicit `FABU` confirmation. Standalone publishing from a video folder or XLSX/CSV plan is also available from mode 3.
+H always exposes three entry points: PID, generation, and publishing. PID lookup retrieves the product cover and title from FastMoss. If the user also supplies an image, that uploaded image remains the visual source while FastMoss contributes title context and the exact product PID. Kie analyzes image and title together, then generated videos can flow directly into AdsPower scheduling.
+
+Publishing uses exact numeric PID attachment and only accepts positive 30-minute schedule intervals. H runs a no-final-click preview and publishes only after the explicit `FABU` confirmation. Standalone publishing from a video folder or XLSX/CSV plan is also available from entry 3.
 
 ## Kie Key
 
@@ -45,3 +47,15 @@ KIE_API_KEY
 ```
 
 H validates the key before submitting generation work.
+
+## FastMoss Key
+
+Configure one source on each target computer:
+
+```text
+FASTMOSS_API_KEY
+H_FASTMOSS_API_KEY
+<home>/.codex/secrets/h_fastmoss_api_key.txt
+```
+
+Run `scripts\h_run.cmd set-fastmoss-key` on Windows or `./scripts/h_run.sh set-fastmoss-key` on macOS for a one-time private setup. Never put either API key in GitHub.

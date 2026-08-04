@@ -12,7 +12,7 @@ description: 通过 H 与 AdsPower Local API 扫描账号，把 H 生成结果�
 
 ## 固定流程
 
-1. 新任务先运行 `<launcher> start`，逐字显示末尾 JSON 的 `display_text`。
+1. 新任务先运行 `<launcher> start --capability publish`，逐字显示末尾 JSON 的 `display_text`。只有发布入口会准备 AdsPower/Node，不能在 PID 或生成入口提前加载。
 2. 运行 `<launcher> adspower init` 创建默认工作目录、配置和计划模板。
 3. 运行 `<launcher> adspower profiles` 获取环境编号。
 4. 运行 `<launcher> adspower check`，真实进入 TikTok Studio 检查登录、验证码和上传页，但不上传文件；默认静默，排查时才加 `--visible`。
@@ -32,6 +32,8 @@ description: 通过 H 与 AdsPower Local API 扫描账号，把 H 生成结果�
 不得再次要求用户手动寻找生成视频。H 只收集状态为成功且文件头真实有效的视频；PNG/JPEG 改扩展名得到的假 MP4 必须拒绝。
 
 多个 `--profile-no` 可重复传入。视频按账号轮流分配，同一环境内串行，不同环境并发。文案模板支持 `{pid}`、`{index}`、`{filename}`。
+
+`--interval-minutes` 只能填 30 分钟的正整数倍，例如 30、60、90、120。计划完成后逐条核对返回的 `mappings`：每条必须包含视频、原 PID、账号和预约时间。
 
 ## 独立发布
 
@@ -53,7 +55,7 @@ description: 通过 H 与 AdsPower Local API 扫描账号，把 H 生成结果�
 ## 安全边界
 
 - “测试”“检查”“预览”永远不等于正式发布。
-- 商品只使用完整数字 `商品PID` 精确匹配；空 PID 跳过，绝不按标题模糊搜索。
+- 使用 `--attach-pid` 时，每条视频都必须有完整数字 `商品PID`；任一项为空或非数字就整批停止建表。TikTok 只按该 PID 精确搜索并验证挂载，绝不按标题模糊搜索。
 - API Key 只允许保存在工作目录 `config.json`，不得出现在日志、仓库或答复中。
 - 登录失效、验证码、风控和人工验证会停止对应账号，其他账号继续。
 - 最终 Schedule/Post 每项只点击一次；点击后核验失败不得自动重试。

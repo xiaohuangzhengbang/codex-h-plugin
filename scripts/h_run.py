@@ -23,6 +23,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from fastmoss_client import (
+    FastMossError,
+    normalize_pids,
+    query_products,
+    save_product_results,
+    validate_local_reference_image,
+)
+
 
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 PLUGIN_ROOT = (
@@ -35,12 +43,14 @@ MAIN_SCRIPT = PLUGIN_ROOT / "scripts" / "kie_video_batch.py"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 CACHE_ROOT = CODEX_HOME / "cache" / "h"
 USER_KEY_FILE = CODEX_HOME / "secrets" / "h_kie_api_key.txt"
+FASTMOSS_KEY_FILE = CODEX_HOME / "secrets" / "h_fastmoss_api_key.txt"
 LOCAL_KEY_FILE = PLUGIN_ROOT / ".h_api_key"
 REQUIRED_IMPORTS = ["requests", "openpyxl"]
 MIN_PYTHON = (3, 10)
-PROTOCOL_VERSION = "h-fixed-v2"
+PROTOCOL_VERSION = "h-fixed-v3"
 GREETING = "哈喽小杨，你又开始工作啦，想不想小黄啊？"
-MODE_MENU = "请选择处理模式，回复编号即可：\n1. 批处理\n2. 单处理\n3. 发布"
+MODE_MENU = "请选择功能，回复编号即可：\n1. PID\n2. 生成\n3. 发布"
+GENERATE_MENU = "请选择生成方式，回复编号即可：\n1. 批处理\n2. 单处理"
 ADSPOWER_RUNTIME_DIR = PLUGIN_ROOT / "scripts" / "adspower_runtime"
 ADSPOWER_CLI = ADSPOWER_RUNTIME_DIR / "src" / "cli.mjs"
 ADSPOWER_CONFIG_TEMPLATE = ADSPOWER_RUNTIME_DIR / "config.adspower.tiktok.example.json"
@@ -497,11 +507,23 @@ def secret_present(value: str) -> bool:
     return bool("".join(character for character in cleaned if character.isprintable() and not character.isspace()))
 
 
-def key_file_present(path: Path) -> bool:
+def clean_secret(value: str) -> str:
+    return "".join(
+        character
+        for character in value.strip().lstrip("\ufeff")
+        if character.isprintable() and not character.isspace()
+    )
+
+
+def read_secret_file(path: Path) -> str:
     try:
-        return secret_present(path.read_text(encoding="utf-8-sig"))
+        return clean_secret(path.read_text(encoding="utf-8-sig"))
     except OSError:
-        return False
+        return ""
+
+
+def key_file_present(path: Path) -> bool:
+    return bool(read_secret_file(path))
 
 
 def key_sources() -> list[str]:
@@ -515,6 +537,45 @@ def key_sources() -> list[str]:
     if key_file_present(LOCAL_KEY_FILE):
         sources.append("plugin-local .h_api_key")
     return sources
+
+
+def fastmoss_key_sources() -> list[str]:
+    sources: list[str] = []
+    if secret_present(os.environ.get("FASTMOSS_API_KEY", "")):
+        sources.append("FASTMOSS_API_KEY")
+    if secret_present(os.environ.get("H_FASTMOSS_API_KEY", "")):
+        sources.append("H_FASTMOSS_API_KEY")
+    if key_file_present(FASTMOSS_KEY_FILE):
+        sources.append("<home>/.codex/secrets/h_fastmoss_api_key.txt")
+    return sources
+
+
+def fastmoss_api_key() -> tuple[str, str]:
+    candidates = [
+        ("FASTMOSS_API_KEY", clean_secret(os.environ.get("FASTMOSS_API_KEY", ""))),
+        ("H_FASTMOSS_API_KEY", clean_secret(os.environ.get("H_FASTMOSS_API_KEY", ""))),
+        ("<home>/.codex/secrets/h_fastmoss_api_key.txt", read_secret_file(FASTMOSS_KEY_FILE)),
+    ]
+    for source, value in candidates:
+        if value:
+            return value, source
+    raise FastMossError("FastMoss API key is missing.", category="authentication")
+
+
+def write_secret_file(path: Path, value: str) -> None:
+    cleaned = clean_secret(value)
+    if not cleaned:
+        raise RuntimeError("No API key was entered.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    descriptor = os.open(str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(cleaned)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def plugin_version() -> str:
@@ -581,6 +642,7 @@ def local_checks(report: BootstrapReport, *, offline: bool, forwarded_args: list
         "desktop": str(desktop_dir()),
         "desktop_writable": desktop_writable(),
         "kie_key_sources": sources,
+        "fastmoss_key_sources": fastmoss_key_sources(),
         "runtime": report.python if packaged else str(VENV_DIR),
         "portable": packaged,
         "offline": offline,
@@ -667,6 +729,11 @@ def protocol_display(state: str, catalog: dict[str, Any]) -> str:
     batch_video_models = catalog_lines(batch_video_items, "video")
     menus = {
         "mode": MODE_MENU,
+        "pid": (
+            "请发送一个或多个商品 PID。H 会从 FastMoss 拉取商品主图和标题，"
+            "再让 AI 同时分析图片与标题后生成视频。多个 PID 可用空格、逗号或换行分隔。"
+        ),
+        "generate-mode": GENERATE_MENU,
         "batch-root": "请发送要批处理的根文件夹路径。H 会递归扫描整个根目录，并把全部合格图片放进同一个并发池。",
         "batch-image": (
             "请一次回复：图片模型编号 / 分辨率编号 / 比例编号 / 图片反推文本模型编号 / 图片反推元提示词。\n\n"
@@ -683,6 +750,15 @@ def protocol_display(state: str, catalog: dict[str, Any]) -> str:
             "比例：1. 9:16  2. 16:9\n\n"
             f"视频反推文本模型：\n{text_models}\n\n"
             "视频反推元提示词直接回车使用中文默认值。"
+        ),
+        "pid-video": (
+            "FastMoss 商品主图和标题已准备好。请一次回复：视频模型编号 / 时长秒数 / 分辨率 / "
+            "比例编号 / AI 分析文本模型编号 / 视频元提示词。\n\n"
+            f"视频模型：\n{batch_video_models}\n\n"
+            "分辨率：480p / 720p / 1080p（Veo 仅 720p/1080p；Gemini Omni 由模型决定）\n"
+            "比例：1. 9:16  2. 16:9\n\n"
+            f"AI 分析文本模型：\n{text_models}\n\n"
+            "AI 会把原始商品图和 FastMoss 标题一起分析；元提示词直接回车使用中文默认值。"
         ),
         "single-kind": "请选择单处理类型，回复编号即可：\n1. 文本\n2. 图像\n3. 视频",
         "single-text": f"请选择文本模型并发送 prompt：\n{text_models}",
@@ -716,9 +792,10 @@ def protocol_display(state: str, catalog: dict[str, Any]) -> str:
             "3. 已有 XLSX/CSV 发布计划表"
         ),
         "publish-plan": (
-            "请一次发送：视频或 H 结果目录 / AdsPower 环境编号（可多个） / 首次发布时间 / 间隔分钟 / "
+            "请一次发送：视频或 H 结果目录 / AdsPower 环境编号（可多个） / 首次发布时间 / 半小时间隔编号 / "
             "文案模板 / 标签 / 是否按数字 PID 挂商品 / 时区。\n"
-            "文案模板可使用 {pid}、{index}、{filename}；商品只按完整数字 PID 精确匹配。"
+            "间隔：1. 30 分钟  2. 60 分钟  3. 90 分钟  4. 120 分钟，也可填写其他 30 分钟倍数。\n"
+            "文案模板可使用 {pid}、{index}、{filename}；PID 视频必须挂同一个完整数字 PID，绝不按标题匹配。"
         ),
         "publish-file": "请发送现有 XLSX 或 CSV 发布计划表的完整路径。",
         "publish-review": "发布计划已生成并校验。请选择下一步：\n1. 预览上传（不点击最终发布）\n2. 修改计划\n3. 结束",
@@ -739,6 +816,8 @@ def protocol(state: str) -> int:
     normalized = state.strip().lower().replace("_", "-")
     if normalized not in {
         "mode",
+        "pid",
+        "generate-mode",
         "batch-root",
         "single-kind",
         "post-images",
@@ -792,16 +871,28 @@ def safe_reason(value: object) -> str:
     return text[:500]
 
 
-def start(*, offline: bool = False, force_check: bool = False, forwarded_args: list[str] | None = None) -> int:
+def start(
+    *,
+    offline: bool = False,
+    force_check: bool = False,
+    capability: str = "menu",
+    forwarded_args: list[str] | None = None,
+) -> int:
+    capability = capability.strip().lower()
+    if capability not in {"menu", "pid", "generate", "publish"}:
+        raise ValueError(f"Unsupported H capability: {capability}")
     report = bootstrap()
     forwarded_args = forwarded_args or []
     checks = local_checks(report, offline=offline, forwarded_args=forwarded_args)
-    try:
-        checks["adspower_runtime"] = ensure_adspower_runtime(install=not offline)
-    except Exception as exc:
-        if not offline:
-            raise
-        checks["adspower_runtime"] = {"ready": False, "error": safe_reason(exc)}
+    if capability == "publish":
+        try:
+            checks["adspower_runtime"] = ensure_adspower_runtime(install=not offline)
+        except Exception as exc:
+            if not offline:
+                raise
+            checks["adspower_runtime"] = {"ready": False, "error": safe_reason(exc)}
+    else:
+        checks["adspower_runtime"] = {"ready": None, "skipped": True}
     status = setup_status(report)
     if not checks["desktop_writable"]:
         display = f"{GREETING}\n\nH 自动环境准备失败。\n归因：桌面目录不可写。\n请修复桌面目录权限后重新调用 H。"
@@ -819,14 +910,7 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
             }
         )
         return 0
-    if not checks["kie_key_sources"]:
-        display = (
-            f"{GREETING}\n\n{status}\n\n"
-            "尚未检测到 Kie API Key。请先设置一次密钥；H 不会把密钥写入仓库或输出日志。"
-        )
-        print_json({"ready": False, "state": "key-required", "bootstrap": asdict(report), "checks": checks, "display_text": display})
-        return 0
-    if ready_cache_valid() and not force_check:
+    if capability == "menu":
         print_json(
             {
                 "ready": True,
@@ -838,6 +922,68 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
             }
         )
         return 0
+    if capability == "pid":
+        if not checks["fastmoss_key_sources"]:
+            display = (
+                f"{GREETING}\n\n{status}\n\n"
+                "尚未检测到 FastMoss API Key。请设置 FASTMOSS_API_KEY，或运行一次 H 的 "
+                "set-fastmoss-key；密钥只保存在当前用户的 .codex/secrets 目录。"
+            )
+            print_json(
+                {
+                    "ready": False,
+                    "state": "fastmoss-key-required",
+                    "bootstrap": asdict(report),
+                    "checks": checks,
+                    "display_text": display,
+                }
+            )
+            return 0
+        print_json(
+            {
+                "ready": True,
+                "state": "pid",
+                "protocol_version": PROTOCOL_VERSION,
+                "bootstrap": asdict(report),
+                "checks": checks,
+                "display_text": f"{GREETING}\n\n{status}\n\n{protocol_display('pid', {})}",
+            }
+        )
+        return 0
+    if capability == "publish":
+        runtime = checks.get("adspower_runtime")
+        if not isinstance(runtime, dict) or not runtime.get("ready"):
+            raise RuntimeError("AdsPower publishing runtime is not ready.")
+        print_json(
+            {
+                "ready": True,
+                "state": "publish-source",
+                "protocol_version": PROTOCOL_VERSION,
+                "bootstrap": asdict(report),
+                "checks": checks,
+                "display_text": f"{GREETING}\n\n{status}\n\n{protocol_display('publish-source', {})}",
+            }
+        )
+        return 0
+    if not checks["kie_key_sources"]:
+        display = (
+            f"{GREETING}\n\n{status}\n\n"
+            "尚未检测到 Kie API Key。请先设置一次密钥；H 不会把密钥写入仓库或输出日志。"
+        )
+        print_json({"ready": False, "state": "key-required", "bootstrap": asdict(report), "checks": checks, "display_text": display})
+        return 0
+    if ready_cache_valid() and not force_check:
+        print_json(
+            {
+                "ready": True,
+                "state": "generate-mode",
+                "protocol_version": PROTOCOL_VERSION,
+                "bootstrap": asdict(report),
+                "checks": checks,
+                "display_text": f"{GREETING}\n\n{status}\n\n{GENERATE_MENU}",
+            }
+        )
+        return 0
     code, api_result, raw_output = run_api_doctor(report, forwarded_args)
     checks["kie_api"] = api_result or {"ready": False, "message": raw_output[-1000:]}
     if code == 0 and api_result.get("ready"):
@@ -845,11 +991,11 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
         print_json(
             {
                 "ready": True,
-                "state": "mode",
+                "state": "generate-mode",
                 "protocol_version": PROTOCOL_VERSION,
                 "bootstrap": asdict(report),
                 "checks": checks,
-                "display_text": f"{GREETING}\n\n{status}\n\n{MODE_MENU}",
+                "display_text": f"{GREETING}\n\n{status}\n\n{GENERATE_MENU}",
             }
         )
         return 0
@@ -871,6 +1017,122 @@ def start(*, offline: bool = False, force_check: bool = False, forwarded_args: l
         }
     )
     return 0
+
+
+def default_fastmoss_work_dir() -> Path:
+    return desktop_dir() / "H返回结果_PID"
+
+
+def fastmoss_product_display(saved: dict[str, Any]) -> str:
+    lines = [
+        f"FastMoss PID 查询完成：成功 {saved['success']}，可生成视频 {saved['ready_for_generation']}，未找到 {saved['not_found']}。"
+    ]
+    for item in list(saved["results"])[:10]:
+        pid = str(item.get("pid") or "")
+        product = item.get("product") if isinstance(item.get("product"), dict) else {}
+        if item.get("state") == "not_found":
+            lines.append(f"- {pid}：未找到商品")
+            continue
+        title = " ".join(str(product.get("title") or "未返回标题").split())[:120]
+        image_status = "主图已保存" if item.get("reference_image") else "主图下载失败，请上传图片"
+        lines.append(f"- {pid}：{title}；{image_status}")
+    if len(saved["results"]) > 10:
+        lines.append(f"其余 {len(saved['results']) - 10} 个结果已写入结果目录。")
+    lines.append(f"结果目录：{saved['generation_root']}")
+    if saved["ready_for_generation"]:
+        lines.append("下一步：让 AI 同时分析已保存的商品主图和 FastMoss 标题，然后生成视频。")
+    return "\n".join(lines)
+
+
+def fastmoss_error_display(exc: Exception) -> str:
+    category = exc.category if isinstance(exc, FastMossError) else "runtime"
+    labels = {
+        "authentication": "FastMoss 密钥无效、已失效或未配置",
+        "quota": "FastMoss 调用次数或额度不足",
+        "permission": "当前 FastMoss Key 没有商品查询权限",
+        "rate_limit": "FastMoss 接口正在限流",
+        "validation": "PID、上传图片或请求参数不符合要求",
+        "not_found": "FastMoss 没有找到对应商品",
+        "invalid_result": "FastMoss 返回的商品主图不可用",
+        "network": "网络、代理或 TLS 连接异常",
+        "provider": "FastMoss 服务暂时异常",
+        "runtime": "本地运行环境异常",
+    }
+    lines = ["FastMoss PID 查询失败。", f"归因：{labels.get(category, '未分类错误')}。", f"原因：{safe_reason(exc)}"]
+    if isinstance(exc, FastMossError) and exc.request_id:
+        lines.append(f"请求编号：{exc.request_id}")
+    lines.append("本次没有提交任何 Kie 生成或 TikTok 发布任务。")
+    return "\n".join(lines)
+
+
+def build_fastmoss_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="h_run fastmoss", description="H FastMoss PID workflow")
+    commands = parser.add_subparsers(dest="fastmoss_command", required=True)
+    product = commands.add_parser("product")
+    product.add_argument("--pid", action="append", required=True)
+    product.add_argument(
+        "--media",
+        action="append",
+        default=[],
+        help="Optional uploaded product image. Repeat once per PID in the same order.",
+    )
+    product.add_argument("--work-dir", default=str(default_fastmoss_work_dir()))
+    product.add_argument("--timeout", type=int, default=60)
+    product.add_argument("--skip-image-download", action="store_true")
+    commands.add_parser("status")
+    return parser
+
+
+def map_pid_reference_images(pids: list[str], media_values: list[str]) -> dict[str, Path]:
+    if not media_values:
+        return {}
+    if len(media_values) != len(pids):
+        raise FastMossError(
+            "Uploaded image count must exactly match PID count so every product keeps a one-to-one mapping.",
+            category="validation",
+        )
+    mapped: dict[str, Path] = {}
+    for pid, value in zip(pids, media_values, strict=True):
+        source, _extension = validate_local_reference_image(Path(value))
+        mapped[pid] = source
+    return mapped
+
+
+def fastmoss_command(argv: list[str]) -> int:
+    args = build_fastmoss_parser().parse_args(argv)
+    if args.fastmoss_command == "status":
+        sources = fastmoss_key_sources()
+        print_json(
+            {
+                "ready": bool(sources),
+                "stage": "fastmoss-status",
+                "key_sources": sources,
+                "key_file": str(FASTMOSS_KEY_FILE),
+            }
+        )
+        return 0 if sources else 1
+    pids = normalize_pids(args.pid)
+    reference_images = map_pid_reference_images(pids, args.media)
+    api_key, key_source = fastmoss_api_key()
+    query = query_products(pids, api_key, timeout=args.timeout)
+    saved = save_product_results(
+        query,
+        Path(args.work_dir),
+        download_images=not args.skip_image_download,
+        reference_images=reference_images,
+    )
+    ready_for_generation = int(saved["ready_for_generation"])
+    payload = {
+        "ready": ready_for_generation > 0,
+        "stage": "fastmoss-product",
+        "source": "FastMoss",
+        "key_source": key_source,
+        **saved,
+        "next_state": "pid-video" if ready_for_generation > 0 else "pid",
+        "display_text": fastmoss_product_display(saved),
+    }
+    print_json(payload)
+    return 0 if ready_for_generation > 0 else 2
 
 
 def default_adspower_work_dir() -> Path:
@@ -951,9 +1213,15 @@ def discover_publish_videos(video_root: Path) -> list[dict[str, str]]:
             if candidate.suffix.lower() not in VIDEO_EXTENSIONS or not video_file_valid(candidate):
                 continue
             key = os.path.normcase(str(candidate))
+            record_pid = str(record.get("pid") or candidate.stem).strip()
+            existing = discovered.get(key)
+            if existing and existing["pid"] != record_pid:
+                raise ValueError(
+                    f"Conflicting PID records for {candidate}: {existing['pid']} and {record_pid}"
+                )
             discovered[key] = {
                 "path": str(candidate),
-                "pid": str(record.get("pid") or candidate.stem).strip(),
+                "pid": record_pid,
                 "filename": candidate.name,
             }
     for candidate in root.rglob("*"):
@@ -997,8 +1265,18 @@ def create_adspower_plan(args: argparse.Namespace, work_dir: Path) -> dict[str, 
         start_at = datetime.strptime(args.start_at.strip(), "%Y-%m-%d %H:%M")
     except ValueError as exc:
         raise ValueError("Start time must use YYYY-MM-DD HH:MM.") from exc
-    if args.interval_minutes < 1:
-        raise ValueError("Interval minutes must be at least 1.")
+    if args.interval_minutes < 30 or args.interval_minutes % 30:
+        raise ValueError("Schedule interval must be a positive multiple of 30 minutes.")
+    invalid_mappings = [
+        f"{item['filename']} -> {item['pid']}"
+        for item in videos
+        if not item["pid"].isdigit() or Path(item["path"]).stem != item["pid"]
+    ]
+    if args.attach_pid and invalid_mappings:
+        raise ValueError(
+            "Every video filename and result record must carry the same exact numeric PID before product attachment. "
+            "Invalid mappings: " + ", ".join(invalid_mappings[:20])
+        )
     plan_path = (work_dir / args.plan_name).resolve()
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     headers = [
@@ -1013,7 +1291,7 @@ def create_adspower_plan(args: argparse.Namespace, work_dir: Path) -> dict[str, 
         "发布模式",
         "任务ID",
     ]
-    skipped_product_pids: list[str] = []
+    mappings: list[dict[str, str]] = []
     with plan_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
@@ -1021,20 +1299,28 @@ def create_adspower_plan(args: argparse.Namespace, work_dir: Path) -> dict[str, 
             index = offset + 1
             pid = item["pid"]
             product_pid = pid if args.attach_pid and pid.isdigit() else ""
-            if args.attach_pid and not product_pid:
-                skipped_product_pids.append(pid)
+            profile = profiles[offset % len(profiles)]
+            scheduled_at = (start_at + timedelta(minutes=offset * args.interval_minutes)).strftime("%Y-%m-%d %H:%M")
             writer.writerow(
                 {
                     "启用": "yes",
-                    "环境编号": profiles[offset % len(profiles)],
+                    "环境编号": profile,
                     "视频路径": item["path"],
                     "文案": render_caption(args.caption_template, item, index),
                     "标签": args.hashtags.strip(),
                     "商品PID": product_pid,
-                    "预定时间": (start_at + timedelta(minutes=offset * args.interval_minutes)).strftime("%Y-%m-%d %H:%M"),
+                    "预定时间": scheduled_at,
                     "时区": args.timezone.strip(),
                     "发布模式": args.publish_mode,
                     "任务ID": f"h-{index:04d}-{''.join(character for character in pid if character.isalnum())[:24] or 'video'}",
+                }
+            )
+            mappings.append(
+                {
+                    "video": item["path"],
+                    "pid": product_pid,
+                    "profile": profile,
+                    "scheduled_at": scheduled_at,
                 }
             )
     return {
@@ -1047,7 +1333,7 @@ def create_adspower_plan(args: argparse.Namespace, work_dir: Path) -> dict[str, 
         "start_at": start_at.strftime("%Y-%m-%d %H:%M"),
         "interval_minutes": args.interval_minutes,
         "attach_pid": bool(args.attach_pid),
-        "skipped_non_numeric_pids": skipped_product_pids,
+        "mappings": mappings,
         "next_state": "publish-review",
     }
 
@@ -1530,13 +1816,29 @@ def install_local() -> int:
 
 
 def set_key() -> int:
-    value = getpass.getpass("Kie API key: ").strip().lstrip("\ufeff")
-    value = "".join(ch for ch in value if ch.isprintable() and not ch.isspace())
+    value = clean_secret(getpass.getpass("Kie API key: "))
     if not value:
         raise RuntimeError("No Kie API key was entered.")
-    USER_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USER_KEY_FILE.write_text(value, encoding="utf-8")
+    write_secret_file(USER_KEY_FILE, value)
     print(f"Kie API key saved to {USER_KEY_FILE}", flush=True)
+    return 0
+
+
+def set_fastmoss_key() -> int:
+    value = clean_secret(os.environ.pop("H_FASTMOSS_KEY_INPUT", ""))
+    if not value:
+        value = clean_secret(getpass.getpass("FastMoss API key: "))
+    if not value:
+        raise RuntimeError("No FastMoss API key was entered.")
+    write_secret_file(FASTMOSS_KEY_FILE, value)
+    print_json(
+        {
+            "ready": True,
+            "state": "fastmoss-key-saved",
+            "key_file": str(FASTMOSS_KEY_FILE),
+            "display_text": "FastMoss API Key 已安全保存到当前用户目录，未写入插件或日志。",
+        }
+    )
     return 0
 
 
@@ -1562,16 +1864,32 @@ def main(argv: list[str]) -> int:
             return install_local()
         if command == "set-key":
             return set_key()
+        if command == "set-fastmoss-key":
+            return set_fastmoss_key()
         if command in {"bootstrap", "--bootstrap"}:
             return doctor(offline=True)
         if command in {"--doctor", "doctor"}:
             extra = [value for value in argv[1:] if value != "--offline"]
             return doctor(offline="--offline" in argv[1:], forwarded_args=extra)
         if command == "start":
-            extra = [value for value in argv[1:] if value not in {"--offline", "--force-check"}]
+            capability = "menu"
+            extra: list[str] = []
+            index = 1
+            while index < len(argv):
+                value = argv[index]
+                if value == "--capability":
+                    if index + 1 >= len(argv):
+                        raise ValueError("--capability requires pid, generate, publish, or menu")
+                    capability = argv[index + 1]
+                    index += 2
+                    continue
+                if value not in {"--offline", "--force-check"}:
+                    extra.append(value)
+                index += 1
             return start(
                 offline="--offline" in argv[1:],
                 force_check="--force-check" in argv[1:],
+                capability=capability,
                 forwarded_args=extra,
             )
         if command == "protocol":
@@ -1587,6 +1905,15 @@ def main(argv: list[str]) -> int:
                     env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
                 )
             return adspower_command(argv[1:])
+        if command == "fastmoss":
+            report = bootstrap()
+            if report.runtime_source != "packaged-executable" and Path(sys.executable).resolve() != Path(report.python).resolve():
+                return subprocess.call(
+                    [report.python, str(Path(__file__).resolve()), *argv],
+                    cwd=str(PLUGIN_ROOT),
+                    env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                )
+            return fastmoss_command(argv[1:])
         report = bootstrap()
         return subprocess.call(core_command(report, argv), cwd=str(PLUGIN_ROOT))
     except Exception as exc:
@@ -1600,6 +1927,21 @@ def main(argv: list[str]) -> int:
                     "stage": "publish",
                     "error_category": adspower_error_category(exc),
                     "error": safe_reason(exc),
+                }
+            )
+            return 1
+        if command == "fastmoss":
+            details = exc.as_dict() if isinstance(exc, FastMossError) else {
+                "error_category": "runtime",
+                "error": safe_reason(exc),
+            }
+            print_json(
+                {
+                    "ready": False,
+                    "state": "fastmoss-error",
+                    "stage": "fastmoss-product",
+                    **details,
+                    "display_text": fastmoss_error_display(exc),
                 }
             )
             return 1

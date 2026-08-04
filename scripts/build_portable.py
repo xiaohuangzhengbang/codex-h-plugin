@@ -25,7 +25,14 @@ PLATFORM_NAMES = {
 }
 PAYLOAD_DIRECTORIES = [".codex-plugin", "assets", "skills"]
 PAYLOAD_FILES = ["README.md", "INSTALL.md", "LICENSE", "requirements.txt"]
-PAYLOAD_SCRIPTS = ["h_run.py", "h_run.cmd", "h_run.sh", "h_bootstrap.ps1", "kie_video_batch.py"]
+PAYLOAD_SCRIPTS = [
+    "h_run.py",
+    "h_run.cmd",
+    "h_run.sh",
+    "h_bootstrap.ps1",
+    "kie_video_batch.py",
+    "fastmoss_client.py",
+]
 PAYLOAD_SCRIPT_DIRECTORIES = ["adspower_runtime"]
 
 
@@ -139,7 +146,7 @@ def write_installers(package_root: Path, target: str) -> None:
 5. 看到“H 安装完成”后，完全退出并重新打开 Codex，再新建任务调用 H。
 
 安装器会注册本地 personal marketplace，不会要求 Codex 识别 GitHub 链接，也不会覆盖其他个人插件。
-Kie API Key 仍保存在用户自己的 ~/.codex/secrets/h_kie_api_key.txt，不包含在本压缩包中。
+Kie 与 FastMoss API Key 仍保存在用户自己的 ~/.codex/secrets/ 目录，不包含在本压缩包中。
 """
     (package_root / "安装说明.txt").write_text(instructions, encoding="utf-8")
     if target == "windows-x64":
@@ -214,6 +221,36 @@ def smoke_test(package_root: Path) -> None:
         payload = parse_last_json(protocol.stdout)
         if protocol.returncode != 0 or not payload.get("ready") or "GPT Image-2" not in payload.get("display_text", ""):
             raise RuntimeError(f"Installed portable H protocol smoke test failed:\n{protocol.stdout[-4000:]}")
+        menu = subprocess.run(
+            [str(installed_launcher), "protocol", "mode"],
+            cwd=str(installed_launcher.parent.parent),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=300,
+        )
+        menu_payload = parse_last_json(menu.stdout)
+        if menu.returncode != 0 or "1. PID" not in menu_payload.get("display_text", ""):
+            raise RuntimeError(f"Installed portable H PID menu smoke test failed:\n{menu.stdout[-4000:]}")
+        fastmoss_status = subprocess.run(
+            [str(installed_launcher), "fastmoss", "status"],
+            cwd=str(installed_launcher.parent.parent),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=300,
+        )
+        fastmoss_payload = parse_last_json(fastmoss_status.stdout)
+        if fastmoss_status.returncode != 1 or fastmoss_payload.get("stage") != "fastmoss-status":
+            raise RuntimeError(f"Portable H FastMoss module smoke test failed:\n{fastmoss_status.stdout[-4000:]}")
         from openpyxl import Workbook
 
         video = home / "publish-smoke.mp4"
@@ -288,7 +325,7 @@ def main() -> int:
         ROOT / "scripts" / "h_run.py",
         runtime,
         work_root,
-        include_certifi=False,
+        include_certifi=True,
         collect_packages=("openpyxl",),
     )
     write_installers(package_root, args.platform)
@@ -302,6 +339,7 @@ def main() -> int:
         "requires_git": False,
         "requires_homebrew": False,
         "bundled_adspower_playwright": True,
+        "fastmoss_pid_lookup": True,
     }
     (package_root / "PACKAGE-INFO.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     smoke_test(package_root)

@@ -1,13 +1,14 @@
 {
   "name": "h",
-  "version": "0.3.0+codex.20260803053917",
-  "description": "GitHub-installed Kie generation and AdsPower TikTok publishing workflow with automatic runtime setup.",
+  "version": "0.4.0+codex.20260804031849",
+  "description": "GitHub-installed FastMoss PID, Kie generation, and AdsPower TikTok publishing workflow with automatic runtime setup.",
   "author": {
     "name": "XIAOH"
   },
   "license": "MIT",
   "keywords": [
     "kie",
+    "fastmoss",
     "product-image",
     "image-to-video",
     "batch-video",
@@ -17,9 +18,9 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "H",
-    "shortDescription": "Kie \u751f\u6210\u540e\u76f4\u63a5\u63a5\u5165 AdsPower \u53d1\u5e03 TikTok\u3002",
-    "longDescription": "H installs from GitHub and connects Kie generation with AdsPower TikTok publishing through one deterministic Chinese workflow. It supports recursive whole-folder concurrent generation, one-model processing, standalone publishing, and direct publishing of the videos just generated. First use scans and prepares Python, Node, Playwright, and XLSX support for Windows x64, Intel Mac, and Apple Silicon Mac. Publishing always checks and previews before the explicit FABU confirmation, uses exact numeric product PID matching, keeps one profile serial while running different profiles concurrently, and records per-account logs and screenshots.",
+    "displayName": "H \u00b7 PID / \u751f\u6210 / \u53d1\u5e03",
+    "shortDescription": "FastMoss PID \u2192 Kie \u751f\u6210 \u2192 AdsPower \u53d1\u5e03\u3002",
+    "longDescription": "H installs from GitHub and exposes exactly three Chinese entry points: PID, generation, and publishing. Numeric product PIDs retrieve the original cover and title from FastMoss; uploaded images remain the visual source while PID data supplies title context and the exact later product attachment. Kie analyzes image and title together, processes a whole folder in one concurrent pool, and preserves resumable task records. Generated videos flow directly into AdsPower TikTok scheduling, where each video must retain its exact numeric PID and scheduled intervals use positive 30-minute multiples. First use prepares only the selected capability and supports Windows x64, Intel Mac, and Apple Silicon Mac without requiring a preinstalled Python or Node runtime.",
     "developerName": "XIAOH",
     "category": "Productivity",
     "capabilities": [
@@ -27,15 +28,15 @@
       "Video Generation",
       "Text Generation",
       "Batch Processing",
+      "FastMoss PID Lookup",
       "AdsPower Local API",
       "TikTok Scheduling",
       "TikTok Publishing"
     ],
     "defaultPrompt": [
-      "\u4f7f\u7528 H \u6279\u91cf\u5904\u7406\u6574\u4e2a PID \u4ea7\u54c1\u6587\u4ef6\u5939\u3002",
-      "\u4f7f\u7528 H \u5355\u72ec\u8c03\u7528\u4e00\u4e2a Kie \u6587\u672c\u3001\u56fe\u50cf\u6216\u89c6\u9891\u6a21\u578b\u3002",
-      "\u4f7f\u7528 H \u5c06\u521a\u751f\u6210\u7684\u89c6\u9891\u901a\u8fc7 AdsPower \u9884\u89c8\u5e76\u53d1\u5e03\u5230 TikTok\u3002",
-      "\u4f7f\u7528 H \u4ece XLSX/CSV \u8ba1\u5212\u8868\u72ec\u7acb\u6279\u91cf\u6392\u671f TikTok \u89c6\u9891\u3002"
+      "\u4f7f\u7528 H \u6839\u636e\u5546\u54c1 PID \u4ece FastMoss \u62c9\u53d6\u4e3b\u56fe\u548c\u6807\u9898\uff0c\u5206\u6790\u540e\u751f\u6210\u89c6\u9891\u3002",
+      "\u4f7f\u7528 H \u5bf9\u56fe\u7247\u6216\u6574\u4e2a\u6587\u4ef6\u5939\u8fdb\u884c\u6279\u5904\u7406\u6216\u5355\u5904\u7406\u751f\u6210\u3002",
+      "\u4f7f\u7528 H \u628a\u89c6\u9891\u6309\u539f PID \u7cbe\u786e\u6302\u5546\u54c1\uff0c\u4ee5 30 \u5206\u949f\u500d\u6570\u9884\u7ea6\u5e76\u53d1\u5e03\u5230 TikTok\u3002"
     ],
     "brandColor": "#185E70",
     "composerIcon": "./assets/icon.png",
