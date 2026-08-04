@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -433,6 +434,9 @@ def test_adspower_runtime_is_bundled_and_node_downloads_are_pinned():
     launcher = load_launcher()
     assert launcher.ADSPOWER_RUNTIME_ARCHIVE.is_file()
     assert launcher.sha256_file(launcher.ADSPOWER_RUNTIME_ARCHIVE) == launcher.ADSPOWER_RUNTIME_SHA256
+    with zipfile.ZipFile(launcher.ADSPOWER_RUNTIME_ARCHIVE) as archive:
+        assert archive.namelist()
+        assert all("\\" not in name and not name.startswith("/") for name in archive.namelist())
     prepared = launcher.ensure_adspower_payload()
     assert prepared == launcher.ADSPOWER_RUNTIME_DIR
     assert launcher.adspower_dependencies_ready()
@@ -453,6 +457,7 @@ def test_adspower_runtime_is_bundled_and_node_downloads_are_pinned():
     assert 'ignore=shutil.ignore_patterns("node_modules")' in build_source
     assert '"fastmoss_client.py"' in build_source
     assert 'collect_packages=("openpyxl",)' in build_source
+    assert (SCRIPT_DIR / "build_adspower_bundle.py").is_file()
 
 
 def test_missing_node_is_automatically_downloaded_once():
