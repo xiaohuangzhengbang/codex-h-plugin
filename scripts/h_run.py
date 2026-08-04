@@ -600,10 +600,29 @@ def fastmoss_api_key() -> tuple[str, str]:
         ("H_FASTMOSS_API_KEY", clean_secret(os.environ.get("H_FASTMOSS_API_KEY", ""))),
         ("<home>/.codex/secrets/h_fastmoss_api_key.txt", read_secret_file(FASTMOSS_KEY_FILE)),
     ]
+    kie_values = configured_kie_keys()
     for source, value in candidates:
         if value:
+            if value in kie_values:
+                raise FastMossError(
+                    "FastMoss API key is identical to the Kie API key; the credential was likely saved in the wrong key slot.",
+                    category="authentication",
+                )
             return value, source
     raise FastMossError("FastMoss API key is missing.", category="authentication")
+
+
+def configured_kie_keys() -> set[str]:
+    return {
+        value
+        for value in (
+            clean_secret(os.environ.get("H_KIE_API_KEY", "")),
+            clean_secret(os.environ.get("KIE_API_KEY", "")),
+            read_secret_file(USER_KEY_FILE),
+            read_secret_file(LOCAL_KEY_FILE),
+        )
+        if value
+    }
 
 
 def write_secret_file(path: Path, value: str) -> None:
@@ -1863,6 +1882,8 @@ def set_key() -> int:
     value = clean_secret(getpass.getpass("Kie API key: "))
     if not value:
         raise RuntimeError("No Kie API key was entered.")
+    if value == read_secret_file(FASTMOSS_KEY_FILE):
+        raise RuntimeError("Kie API key cannot be identical to the configured FastMoss API key.")
     write_secret_file(USER_KEY_FILE, value)
     print(f"Kie API key saved to {USER_KEY_FILE}", flush=True)
     return 0
@@ -1874,6 +1895,8 @@ def set_fastmoss_key() -> int:
         value = clean_secret(getpass.getpass("FastMoss API key: "))
     if not value:
         raise RuntimeError("No FastMoss API key was entered.")
+    if value in configured_kie_keys():
+        raise RuntimeError("FastMoss API key cannot be identical to the configured Kie API key.")
     write_secret_file(FASTMOSS_KEY_FILE, value)
     print_json(
         {

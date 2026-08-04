@@ -197,6 +197,24 @@ def test_invalid_pid_and_quota_errors_are_attributed():
         assert exc.request_id == "quota-request"
 
 
+def test_invalid_client_secret_is_attributed_to_authentication():
+    client = load_client()
+
+    def invalid_secret_post(_url, **_kwargs):
+        return FakeJSONResponse(
+            {"code": 1002, "message": "invalid client_secret", "request_id": "auth-request"}
+        )
+
+    try:
+        client.query_products(["1736655705387075351"], "wrong-secret", post=invalid_secret_post)
+        raise AssertionError("invalid FastMoss credential was accepted")
+    except client.FastMossError as exc:
+        assert exc.category == "authentication"
+        assert exc.code == 1002
+        assert exc.request_id == "auth-request"
+        assert "invalid client_secret" in str(exc)
+
+
 def test_kie_reverse_analysis_uses_image_and_untrusted_title_context():
     kie = load_module("kie_video_batch_under_fastmoss_test", KIE_SCRIPT)
     calls = []
