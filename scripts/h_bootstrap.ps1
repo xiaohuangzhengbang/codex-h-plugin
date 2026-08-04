@@ -165,9 +165,14 @@ if (Test-HRuntime) {
     Start-HRuntime -Source "github-runtime-cache"
 }
 
-if ($env:H_FORCE_GITHUB_RUNTIME -eq "1") {
+$RuntimeFailure = $null
+try {
     Install-HGithubRuntime
     Start-HRuntime -Source "github-runtime-download"
+}
+catch {
+    $RuntimeFailure = $_.Exception.Message
+    Write-Warning "H could not download its GitHub runtime; trying a Python fallback."
 }
 
 $BundledCandidates = @(
@@ -202,16 +207,6 @@ foreach ($Name in @("python.exe", "python3.exe")) {
     if ($Command -and (Test-HPython $Command.Source)) {
         Start-H -Executable $Command.Source -Prefix @() -Source "system-path"
     }
-}
-
-$RuntimeFailure = $null
-try {
-    Install-HGithubRuntime
-    Start-HRuntime -Source "github-runtime-download"
-}
-catch {
-    $RuntimeFailure = $_.Exception.Message
-    Write-Warning "H could not download its GitHub runtime; trying the operating-system fallback."
 }
 
 $Winget = Get-Command "winget.exe" -ErrorAction SilentlyContinue

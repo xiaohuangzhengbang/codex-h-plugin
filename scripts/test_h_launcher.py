@@ -435,7 +435,6 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "Invoke-WebRequest" in windows
     assert "System.Security.Cryptography.SHA256" in windows
     assert "Get-FileHash" not in windows
-    assert "H_FORCE_GITHUB_RUNTIME" in windows
     assert "portable-20260804095000" in windows
     assert "v0.4.2-portable.20260804095000" in windows
     assert "H-Codex-Plugin-Windows-x64.zip" in windows
@@ -443,10 +442,12 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "Python.Python.3.12" in windows
     assert "winget.exe" in windows
     assert "powershell.exe" in command
+    windows_startup = windows.rindex("if (Test-HRuntime)")
+    windows_download = windows.index("Install-HGithubRuntime", windows_startup)
+    assert windows_download < windows.index("$BundledCandidates")
 
     assert "codex-runtimes" in shell
     assert "github-runtime" in shell
-    assert "H_FORCE_GITHUB_RUNTIME" in shell
     assert "portable-20260804095000" in shell
     assert "v0.4.2-portable.20260804095000" in shell
     assert "H-Codex-Plugin-macOS-Apple-Silicon.zip" in shell
@@ -458,6 +459,10 @@ def test_cross_platform_bootstrap_sources_are_present():
     assert "/opt/homebrew/bin/brew" in shell
     assert "/usr/local/bin/brew" in shell
     assert "python@3.12" in shell
+    assert all(ord(character) < 128 for character in shell)
+    shell_startup = shell.index('if runtime_ready; then\n  start_github_runtime "github-runtime-cache"')
+    shell_download = shell.index("if download_github_runtime; then", shell_startup)
+    assert shell_download < shell.index("python_supported()")
 
 
 def test_adspower_runtime_is_bundled_and_node_downloads_are_pinned():
