@@ -431,15 +431,26 @@ def test_cross_platform_bootstrap_sources_are_present():
 
 def test_adspower_runtime_is_bundled_and_node_downloads_are_pinned():
     launcher = load_launcher()
+    assert launcher.ADSPOWER_RUNTIME_ARCHIVE.is_file()
+    assert launcher.sha256_file(launcher.ADSPOWER_RUNTIME_ARCHIVE) == launcher.ADSPOWER_RUNTIME_SHA256
+    prepared = launcher.ensure_adspower_payload()
+    assert prepared == launcher.ADSPOWER_RUNTIME_DIR
     assert launcher.adspower_dependencies_ready()
+    source_runtime = PLUGIN_ROOT / "scripts" / "adspower_runtime"
+    for source in source_runtime.rglob("*"):
+        if not source.is_file() or "node_modules" in source.parts:
+            continue
+        extracted = prepared / source.relative_to(source_runtime)
+        assert extracted.is_file(), f"Bundled AdsPower runtime is missing {source.relative_to(source_runtime)}"
+        assert extracted.read_bytes() == source.read_bytes(), f"Bundled AdsPower runtime is stale: {source}"
     assert launcher.NODE_VERSION.startswith("v24.")
     assert set(launcher.NODE_ASSETS) == {"windows-x64", "macos-intel", "macos-apple-silicon"}
     assert all(len(item["sha256"]) == 64 for item in launcher.NODE_ASSETS.values())
-    assert (PLUGIN_ROOT / "scripts" / "adspower_runtime" / "node_modules" / "playwright" / "package.json").is_file()
     assert "openpyxl" in launcher.REQUIRED_IMPORTS
-    assert not (PLUGIN_ROOT / "scripts" / "adspower_runtime" / "node_modules" / "xlsx").exists()
+    assert not (prepared / "node_modules" / "xlsx").exists()
     build_source = (SCRIPT_DIR / "build_portable.py").read_text(encoding="utf-8")
     assert 'PAYLOAD_SCRIPT_DIRECTORIES = ["adspower_runtime"]' in build_source
+    assert 'ignore=shutil.ignore_patterns("node_modules")' in build_source
     assert '"fastmoss_client.py"' in build_source
     assert 'collect_packages=("openpyxl",)' in build_source
 

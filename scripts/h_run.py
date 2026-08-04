@@ -51,7 +51,10 @@ PROTOCOL_VERSION = "h-fixed-v3"
 GREETING = "哈喽小杨，你又开始工作啦，想不想小黄啊？"
 MODE_MENU = "请选择功能，回复编号即可：\n1. PID\n2. 生成\n3. 发布"
 GENERATE_MENU = "请选择生成方式，回复编号即可：\n1. 批处理\n2. 单处理"
-ADSPOWER_RUNTIME_DIR = PLUGIN_ROOT / "scripts" / "adspower_runtime"
+ADSPOWER_RUNTIME_ARCHIVE = PLUGIN_ROOT / "assets" / "adspower-runtime.zip"
+ADSPOWER_RUNTIME_SHA256 = "92bf3603a50de1d4d79a3e72aab972096bdf7640469464094bfdcaea1b563820"
+ADSPOWER_RUNTIME_ID = f"bundle-{ADSPOWER_RUNTIME_SHA256[:16]}"
+ADSPOWER_RUNTIME_DIR = CACHE_ROOT / "adspower-runtime" / ADSPOWER_RUNTIME_ID
 ADSPOWER_CLI = ADSPOWER_RUNTIME_DIR / "src" / "cli.mjs"
 ADSPOWER_CONFIG_TEMPLATE = ADSPOWER_RUNTIME_DIR / "config.adspower.tiktok.example.json"
 ADSPOWER_SCHEDULE_TEMPLATE = PLUGIN_ROOT / "assets" / "adspower-schedule-template.xlsx"
@@ -200,6 +203,45 @@ def adspower_dependencies_ready() -> bool:
     return all(path.is_file() for path in required)
 
 
+def ensure_adspower_payload() -> Path:
+    if adspower_dependencies_ready():
+        return ADSPOWER_RUNTIME_DIR
+    if not ADSPOWER_RUNTIME_ARCHIVE.is_file():
+        raise RuntimeError("H is missing its bundled AdsPower runtime archive. Reinstall H from GitHub.")
+    if sha256_file(ADSPOWER_RUNTIME_ARCHIVE) != ADSPOWER_RUNTIME_SHA256:
+        raise RuntimeError("H bundled AdsPower runtime failed SHA-256 verification. Reinstall H from GitHub.")
+    ADSPOWER_RUNTIME_DIR.parent.mkdir(parents=True, exist_ok=True)
+    with BootstrapLock():
+        if adspower_dependencies_ready():
+            return ADSPOWER_RUNTIME_DIR
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{ADSPOWER_RUNTIME_ID}-",
+                dir=str(ADSPOWER_RUNTIME_DIR.parent),
+            )
+        )
+        try:
+            with zipfile.ZipFile(ADSPOWER_RUNTIME_ARCHIVE) as archive:
+                for member in archive.infolist():
+                    assert_archive_member(staging, member.filename)
+                archive.extractall(staging)
+            required = [
+                staging / "src" / "cli.mjs",
+                staging / "config.adspower.tiktok.example.json",
+                staging / "node_modules" / "playwright" / "package.json",
+            ]
+            if not all(path.is_file() for path in required):
+                raise RuntimeError("H bundled AdsPower runtime archive is incomplete.")
+            if ADSPOWER_RUNTIME_DIR.exists():
+                shutil.rmtree(ADSPOWER_RUNTIME_DIR)
+            os.replace(staging, ADSPOWER_RUNTIME_DIR)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    if not adspower_dependencies_ready():
+        raise RuntimeError("H could not prepare its bundled AdsPower runtime.")
+    return ADSPOWER_RUNTIME_DIR
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -286,7 +328,9 @@ def download_node_runtime(platform_id: str) -> Path:
 
 def ensure_adspower_runtime(*, install: bool) -> dict[str, object]:
     if not adspower_dependencies_ready():
-        raise RuntimeError("H is missing its bundled AdsPower Playwright runtime files. Reinstall H from GitHub.")
+        ensure_adspower_payload()
+    if not adspower_dependencies_ready():
+        raise RuntimeError("H could not prepare its bundled AdsPower Playwright runtime files.")
     platform_id = node_platform_id()
     candidates: list[tuple[str, Path]] = [("h-cache", cached_node_path(platform_id))]
     system_node = shutil.which("node")

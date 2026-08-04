@@ -59,6 +59,14 @@ jobs:
         run: python -m compileall -q scripts
       - name: Validate catalog without a Kie key
         run: python scripts/kie_video_batch.py catalog
+      - name: Reject deep tracked Node dependency paths
+        shell: bash
+        run: |
+          if git ls-files scripts/adspower_runtime/node_modules | grep -q .; then
+            echo "node_modules must stay inside the checksum-pinned archive"
+            exit 1
+          fi
+          test -f assets/adspower-runtime.zip
       - name: Reject committed secrets
         shell: bash
         run: |

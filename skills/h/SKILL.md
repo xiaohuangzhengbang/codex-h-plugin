@@ -13,7 +13,7 @@ H 把商品数据、生成和发布连成一条工作流：PID 阶段只调用 F
 2. 没有明确意图时运行 `start`；已识别纯数字 PID、生成输入或发布输入时，分别运行 `start --capability pid|generate|publish`，不加载无关运行时。
 3. 读取命令输出中的最后一个 JSON，只逐字显示 `display_text`。不得把启动日志、JSON 或额外说明发给用户。
 4. 后续需要菜单时，必须运行 `protocol <state>`，继续逐字显示返回的 `display_text`。
-5. 不得直接运行 `kie_video_batch.py` 或 AdsPower 内部 Node 脚本。只运行平台启动器；它会扫描并一次准备 Python、Node、Playwright 和 XLSX 依赖。
+5. 不得直接运行 `kie_video_batch.py` 或 AdsPower 内部 Node 脚本。只运行平台启动器；它按所选入口准备依赖，发布时会校验并解压内置 Playwright 资源到短缓存路径，不在目标电脑执行 `npm install`。
 6. `start` 返回任何 `*-key-required` 或 `setup-error` 时，只显示 `display_text`，不得提交 FastMoss、Kie 或发布任务。
 7. 视频生成成功后不得结束对话，必须显示可直接发布本次视频的后续菜单。
 

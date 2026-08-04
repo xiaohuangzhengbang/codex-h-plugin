@@ -9,3 +9,4 @@ Thumbs.db
 build/
 dist/
 portable-dist/
+scripts/adspower_runtime/node_modules/

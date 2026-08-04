@@ -46,7 +46,7 @@ codex plugin add h@codex-h-plugin
 3. 使用 Codex 自带或系统已有的 Python 3.10+。
 4. 若没有 Python，从本仓库 GitHub Release 自动下载与系统和芯片匹配的运行时。
 5. 只有进入“发布”时才扫描 Node；缺少时从 Node.js 官方发布地址下载固定版本并校验内置 SHA-256。
-6. Playwright 与 XLSX 依赖随 H 提供，不在目标电脑临时执行 `npm install`。
+6. Playwright 依赖以单个 SHA-256 固定的压缩资源随 H 提供，进入“发布”时自动解压到短缓存路径；GitHub 安装不再检出深层 `node_modules`，目标电脑也不执行 `npm install`。XLSX 支持随 H 的 Python 运行时提供。
 7. 所有运行时缓存到 `<home>/.codex/cache/h/`；GitHub 下载失败时才使用系统包管理器回退。
 
 用户不需要自己安装 Python、Node、npm、pip、`requests` 或 Homebrew，也不需要处理 ZIP。运行时只下载一次，后续直接复用缓存。

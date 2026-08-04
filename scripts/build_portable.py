@@ -86,7 +86,11 @@ def copy_payload(payload: Path) -> None:
     for name in PAYLOAD_SCRIPTS:
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
     for name in PAYLOAD_SCRIPT_DIRECTORIES:
-        shutil.copytree(ROOT / "scripts" / name, scripts / name)
+        shutil.copytree(
+            ROOT / "scripts" / name,
+            scripts / name,
+            ignore=shutil.ignore_patterns("node_modules"),
+        )
 
 
 def build_binary(
