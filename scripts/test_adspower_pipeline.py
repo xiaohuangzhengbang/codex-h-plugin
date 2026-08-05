@@ -89,6 +89,23 @@ def test_generated_results_become_a_valid_round_robin_publish_plan():
         ]
 
 
+def test_bare_hashtags_option_is_treated_as_an_empty_value():
+    launcher = load_launcher()
+    parser = launcher.build_adspower_parser()
+    args = parser.parse_args(
+        [
+            "plan",
+            "--video-root", "videos",
+            "--profile-no", "2",
+            "--start-at", "2026-08-05 17:00",
+            "--hashtags",
+            "--timezone", "Asia/Shanghai",
+        ]
+    )
+    assert args.hashtags == ""
+    assert args.timezone == "Asia/Shanghai"
+
+
 def test_fake_mp4_is_rejected_before_a_publish_plan_is_created():
     launcher = load_launcher()
     with tempfile.TemporaryDirectory() as temp_dir:

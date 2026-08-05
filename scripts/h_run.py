@@ -1649,7 +1649,7 @@ def build_adspower_parser() -> argparse.ArgumentParser:
     plan.add_argument("--start-at", required=True)
     plan.add_argument("--interval-minutes", type=int, default=60)
     plan.add_argument("--caption-template", default="{pid}")
-    plan.add_argument("--hashtags", default="")
+    plan.add_argument("--hashtags", nargs="?", const="", default="")
     plan.add_argument("--timezone", default="")
     plan.add_argument("--attach-pid", action="store_true")
     plan.add_argument("--publish-mode", choices=["schedule", "draft"], default="schedule")
