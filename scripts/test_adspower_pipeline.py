@@ -243,6 +243,11 @@ def test_ads_runtime_uses_adspower_checks_and_per_profile_reports():
     assert "return [...preflightResults, ...groupResults.flat()]" in publisher
     assert "task.resolveError" in publisher
     assert "requiresManualTakeover" in publisher
+    assert "waitForTikTokUploadInput" in publisher
+    assert "dismissTikTokTours" in publisher
+    assert "TikTok login required in this AdsPower profile" in publisher
+    launcher_source = (PLUGIN_ROOT / "scripts" / "h_run.py").read_text(encoding="utf-8")
+    assert 'tasks_path = work_dir / "tasks" / f"{command}-{stamp}.json"' in launcher_source
     assert "process.exitCode = 2" in cli
     assert "args.report" in cli
 

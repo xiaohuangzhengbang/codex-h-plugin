@@ -52,7 +52,7 @@ GREETING = "哈喽小杨，你又开始工作啦，想不想小黄啊？"
 MODE_MENU = "请选择功能，回复编号即可：\n1. PID\n2. 生成\n3. 发布"
 GENERATE_MENU = "请选择生成方式，回复编号即可：\n1. 批处理\n2. 单处理"
 ADSPOWER_RUNTIME_ARCHIVE = PLUGIN_ROOT / "assets" / "adspower-runtime.zip"
-ADSPOWER_RUNTIME_SHA256 = "c7479291901bc374c4cf3dac489b2abe267f78612e89d878ccee9e554a019e06"
+ADSPOWER_RUNTIME_SHA256 = "f1b5622348d5e632abb19d8af041f73e4523944fc9c0450d181dfe2ce0cef78c"
 ADSPOWER_RUNTIME_ID = f"bundle-{ADSPOWER_RUNTIME_SHA256[:16]}"
 ADSPOWER_RUNTIME_DIR = CACHE_ROOT / "adspower-runtime" / ADSPOWER_RUNTIME_ID
 ADSPOWER_CLI = ADSPOWER_RUNTIME_DIR / "src" / "cli.mjs"
@@ -1579,10 +1579,11 @@ def execute_adspower_plan(
         raise ValueError("Formal publishing requires the exact confirmation code FABU.")
     input_path = resolve_adspower_input(args, work_dir, workspace)
 
-    tasks_path = work_dir / f"tasks.{command}.json"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    tasks_path = work_dir / "tasks" / f"{command}-{stamp}.json"
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
     prepare_adspower_tasks(input_path, tasks_path, command)
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_path = work_dir / "logs" / f"{command}-{stamp}.json"
     log_path = work_dir / "logs" / f"{command}-{stamp}.log"
     result = run_adspower_node(

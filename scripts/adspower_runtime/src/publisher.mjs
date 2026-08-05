@@ -103,6 +103,9 @@ function taskResult(task, status, error = null, manualTakeover = false) {
     profileNo: task.browserSeq ?? task.profileNo ?? '',
     videoPath: task.videoPath,
     scheduledAt: task.scheduledAt ?? '',
+    timezone: task.timezone ?? '',
+    browserTimezone: task.browserTimezone ?? '',
+    appliedScheduledAt: task.scheduleDate && task.scheduleTime ? `${task.scheduleDate} ${task.scheduleTime}` : '',
     productPid: task.productPid ?? '',
     status,
     manualTakeover,
@@ -237,10 +240,10 @@ async function runTikTokStudioPublish(page, task, action) {
   await assertNoRiskGate(page);
 
   // TikTok Studio keeps this input hidden; setInputFiles is faster and language-independent.
-  const fileInput = page.locator("input[type='file'][accept*='video']").first();
-  await fileInput.waitFor({ state: 'attached', timeout });
+  const fileInput = await waitForTikTokUploadInput(page, Math.min(timeout, 30000));
   await fileInput.setInputFiles(task.videoPath, { timeout });
   await waitForUploadReady(page, timeout);
+  await dismissTikTokTours(page);
   // TikTok may auto-fill the filename shortly after reporting upload complete.
   // Wait for that asynchronous default caption before replacing it.
   await page.waitForTimeout(2500);
@@ -256,7 +259,13 @@ async function runTikTokStudioPublish(page, task, action) {
   if (actualCaption !== (task.description || '').trim()) throw new Error(`Caption verification failed: ${JSON.stringify(actualCaption)}`);
 
   if (task.productPid) task.attachedProductName = await attachProductByPid(page, String(task.productPid), timeout);
-  if (task.scheduledAt) await setSchedule(page, task.scheduleDate, task.scheduleTime, timeout);
+  if (task.scheduledAt) {
+    const schedule = await scheduleForBrowser(page, task.scheduledAt, task.timezone);
+    task.browserTimezone = schedule.timezone;
+    task.scheduleDate = schedule.date;
+    task.scheduleTime = schedule.time;
+    await setSchedule(page, schedule.date, schedule.time, timeout);
+  }
   await assertNoRiskGate(page);
 
   if (!task.publish) return;
@@ -279,6 +288,26 @@ async function waitForUploadReady(page, timeout) {
   throw new Error('Video upload did not become ready before timeout');
 }
 
+async function waitForTikTokUploadInput(page, timeout) {
+  const fileInput = page.locator("input[type='file'][accept*='video']").first();
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    await assertNoRiskGate(page);
+    if (await fileInput.count()) return fileInput;
+    await page.waitForTimeout(250);
+  }
+  throw new Error('TikTok upload page did not become ready within 30 seconds');
+}
+
+async function dismissTikTokTours(page) {
+  const overlay = page.locator('[data-test-id="overlay"]:visible');
+  if (!(await overlay.count())) return;
+  const primary = page.locator('div[class*="tutorial-tooltip__footer"] button:visible, [data-test-id="button-primary"]:visible').last();
+  if (await primary.count()) await primary.click({ force: true, timeout: 5000 });
+  else await page.keyboard.press('Escape');
+  await overlay.waitFor({ state: 'hidden', timeout: 5000 });
+}
+
 async function attachProductByPid(page, pid, timeout) {
   const controlTimeout = Math.min(timeout, 15000);
   const addButton = page.locator("[data-e2e='anchor_container'] button:has([data-testid='Plus'])").first();
@@ -286,7 +315,15 @@ async function attachProductByPid(page, pid, timeout) {
   else await page.getByText(ADD_TEXT, { exact: true }).first().click({ timeout: controlTimeout });
   const productOption = page.locator('div.select-option:visible').filter({ hasText: PRODUCT_TEXT }).first();
   await productOption.click({ timeout: controlTimeout });
-  await page.getByText(NEXT_TEXT, { exact: true }).first().locator('xpath=ancestor::button[1]').click({ timeout: controlTimeout });
+  const openProductOptions = page.locator('div.select-option:visible');
+  if (await openProductOptions.count()) {
+    // TikTok Studio's current product selector keeps its option layer open after
+    // selection. Close it before clicking Next so the layer cannot intercept the click.
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+  }
+  const productNext = page.getByText(NEXT_TEXT, { exact: true }).first().locator('xpath=ancestor::button[1]');
+  await productNext.click({ timeout: controlTimeout, force: (await openProductOptions.count()) > 0 });
 
   const search = page.locator('input.TUXTextInputCore-input:visible').last();
   await search.fill(pid, { timeout: controlTimeout });
@@ -299,11 +336,58 @@ async function attachProductByPid(page, pid, timeout) {
   if (await visibleRadios.count() !== 1) throw new Error(`PID ${pid} did not resolve to exactly one selectable product`);
   const radio = visibleRadios.first();
   const productName = await radio.getAttribute('value') || pid;
-  await radio.check({ force: true });
+  await exact.first().click({ timeout: controlTimeout });
+  if (!(await radio.isChecked())) await radio.evaluate((element) => element.click());
+  if (!(await radio.isChecked())) throw new Error(`PID ${pid} exact product row could not be selected`);
   await page.getByText(NEXT_TEXT, { exact: true }).last().locator('xpath=ancestor::button[1]').click({ timeout: controlTimeout });
-  await page.getByText(ADD_TEXT, { exact: true }).last().locator('xpath=ancestor::button[1]').click({ timeout: controlTimeout });
+  const productDialog = page.locator('[role="dialog"]:visible').filter({ has: page.getByText(PRODUCT_NAME_TEXT, { exact: true }) }).last();
+  await productDialog.waitFor({ state: 'visible', timeout: controlTimeout });
+  const productNameInput = productDialog.locator('input[type="text"]:visible').last();
+  await productNameInput.waitFor({ state: 'visible', timeout: controlTimeout });
+  let rawDisplayName = '';
+  for (let attempt = 0; attempt < 20 && !rawDisplayName.trim(); attempt += 1) {
+    rawDisplayName = await productNameInput.inputValue();
+    if (!rawDisplayName.trim()) await page.waitForTimeout(100);
+  }
+  const displayName = tiktokProductDisplayName(rawDisplayName || productName, pid);
+  const addProduct = productDialog.getByText(ADD_TEXT, { exact: true }).locator('xpath=ancestor::button[1]');
+  let attached = false;
+  for (let attempt = 0; attempt < 3 && !attached; attempt += 1) {
+    const displayNameReady = await setTikTokProductDisplayName(page, productDialog, productNameInput, displayName, controlTimeout);
+    if (!displayNameReady) continue;
+    if (await addProduct.isDisabled()) throw new Error(`TikTok rejected product display name: ${JSON.stringify(displayName)}`);
+    await addProduct.click({ timeout: controlTimeout });
+    await page.waitForTimeout(1500);
+    attached = !(await productDialog.isVisible().catch(() => false));
+  }
+  if (!attached) throw new Error(`TikTok did not confirm product attachment after sanitizing: ${JSON.stringify(displayName)}`);
   await page.getByText(pid, { exact: true }).waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
-  return productName.trim();
+  return displayName;
+}
+
+async function setTikTokProductDisplayName(page, productDialog, productNameInput, displayName, timeout) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await productNameInput.click({ timeout });
+    await productNameInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await productNameInput.press('Backspace');
+    await page.keyboard.insertText(displayName);
+    await productNameInput.press('Tab');
+    await page.waitForTimeout(500);
+    const currentName = await productNameInput.inputValue();
+    const invalid = await productNameInput.getAttribute('aria-invalid');
+    const invalidMessage = productDialog.getByText(/invalid characters?|caracteres no válidos|caracteres inválidos/i);
+    if (currentName === displayName && invalid !== 'true' && !(await invalidMessage.isVisible().catch(() => false))) return true;
+  }
+  return false;
+}
+
+function tiktokProductDisplayName(value, fallback) {
+  const clean = String(value || fallback || '')
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}\s._-]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return Array.from(clean || String(fallback || '')).slice(0, 30).join('');
 }
 
 async function setSchedule(page, date, time, timeout) {
@@ -359,6 +443,9 @@ async function verifyPublished(page, task, timeout) {
 }
 
 async function assertNoRiskGate(page) {
+  if (/tiktok\.com\/login(?:[/?#]|$)/i.test(page.url())) {
+    throw new Error('TikTok login required in this AdsPower profile; manual takeover required');
+  }
   const text = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
   if (/captcha|verify you are human|verifica que eres humano|验证码|安全验证/.test(text)) {
     throw new Error('TikTok login/captcha/risk verification detected; manual takeover required');
@@ -369,6 +456,7 @@ async function assertNoRiskGate(page) {
 // schedule fields, time picker and final button use DOM structure/data-e2e selectors.
 const LINK_TEXT = /Add link|Agregar enlace|Adicionar link|Ajouter un lien|Link hinzufügen|Aggiungi link|リンクを追加|링크 추가|添加链接|新增連結|เพิ่มลิงก์|Thêm liên kết|Tambahkan tautan/i;
 const PRODUCT_TEXT = /Products?|Productos?|Produtos?|Produits?|Produkte?|Prodotti?|商品|產品|製品|제품|ผลิตภัณฑ์|Sản phẩm|Produk/i;
+const PRODUCT_NAME_TEXT = /Product name|Nombre del producto|Nome do produto|Nom du produit|Produktname|Nome prodotto|商品名称|產品名稱|商品名|제품 이름|ชื่อผลิตภัณฑ์|Tên sản phẩm|Nama produk/i;
 const NEXT_TEXT = /Next|Siguiente|Próximo|Suivant|Weiter|Avanti|下一步|次へ|다음|ถัดไป|Tiếp theo|Berikutnya/i;
 const ADD_TEXT = /Add|Agregar|Adicionar|Ajouter|Hinzufügen|Aggiungi|添加|新增|追加|추가|เพิ่ม|Thêm|Tambahkan/i;
 const SCHEDULE_TEXT = /Schedule|Programación|Agendar|Planifier|Zeitplan|Programma|定时发布|排期|予約投稿|예약|กำหนดเวลา|Lên lịch|Jadwalkan/i;
@@ -453,6 +541,39 @@ function parseSchedule(value) {
   const match = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
   if (!match) return { date: '', time: '' };
   return { date: match[1], time: match[2] };
+}
+
+async function scheduleForBrowser(page, scheduledAt, sourceTimezone) {
+  const browserTimezone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const source = String(sourceTimezone || browserTimezone).trim();
+  const instant = wallTimeToInstant(scheduledAt, source);
+  const parts = datePartsInTimezone(new Date(instant), browserTimezone);
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}`, timezone: browserTimezone };
+}
+
+function wallTimeToInstant(value, timezone) {
+  const match = String(value).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!match) throw new Error(`Invalid scheduledAt: ${JSON.stringify(value)}`);
+  const wanted = match.slice(1).map(Number);
+  const wantedUtc = Date.UTC(wanted[0], wanted[1] - 1, wanted[2], wanted[3], wanted[4], 0);
+  let instant = wantedUtc;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = datePartsInTimezone(new Date(instant), timezone);
+    const represented = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), 0);
+    const correction = wantedUtc - represented;
+    instant += correction;
+    if (!correction) break;
+  }
+  return instant;
+}
+
+function datePartsInTimezone(date, timezone) {
+  const values = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return values;
 }
 
 async function runWithLimit(items, limit, worker) {
