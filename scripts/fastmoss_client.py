@@ -57,12 +57,14 @@ class FastMossError(RuntimeError):
         code: int | str = "",
         request_id: str = "",
         http_status: int = 0,
+        retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.code = code
         self.request_id = request_id
         self.http_status = http_status
+        self.retryable = retryable
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -70,6 +72,7 @@ class FastMossError(RuntimeError):
             "error_code": self.code,
             "request_id": self.request_id,
             "http_status": self.http_status,
+            "retryable": self.retryable,
             "error": str(self),
         }
 
@@ -146,6 +149,28 @@ def _redact_value(value: Any, secret: str) -> Any:
     return value
 
 
+def _network_error(exc: Exception, operation: str) -> FastMossError:
+    reason = " ".join(str(exc).split())[:500]
+    signature = reason.lower()
+    tls_route_failure = any(
+        token in signature
+        for token in ("ssl", "tls", "handshake", "unexpected_eof", "unexpected eof", "econnreset", "connection reset")
+    )
+    timeout = "timeout" in signature or "timed out" in signature
+    if tls_route_failure:
+        message = (
+            f"{operation} failed because the HTTPS connection was interrupted by the local network or proxy. "
+            "If Clash/Mihomo is enabled, route openapi.fastmoss.com through DIRECT and retry."
+        )
+    elif timeout:
+        message = f"{operation} timed out. Check the local network or proxy and retry."
+    else:
+        message = f"{operation} failed because of a network or proxy error."
+    if reason:
+        message = f"{message} Details: {reason}"
+    return FastMossError(message, category="network", retryable=not tls_route_failure)
+
+
 def _default_post(url: str, **kwargs: Any) -> Any:
     try:
         import requests
@@ -157,10 +182,7 @@ def _default_post(url: str, **kwargs: Any) -> Any:
     try:
         return requests.post(url, **kwargs)
     except requests.RequestException as exc:
-        raise FastMossError(
-            f"FastMoss network request failed: {exc}",
-            category="network",
-        ) from exc
+        raise _network_error(exc, "FastMoss request") from exc
 
 
 def _default_get(url: str, **kwargs: Any) -> Any:
@@ -174,10 +196,7 @@ def _default_get(url: str, **kwargs: Any) -> Any:
     try:
         return requests.get(url, **kwargs)
     except requests.RequestException as exc:
-        raise FastMossError(
-            f"Product cover download failed: {exc}",
-            category="network",
-        ) from exc
+        raise _network_error(exc, "Product cover download") from exc
 
 
 def query_products(
@@ -218,16 +237,13 @@ def query_products(
             )
         except FastMossError as exc:
             last_error = exc
-            if exc.category != "network" or attempt + 1 >= attempts:
+            if exc.category != "network" or not exc.retryable or attempt + 1 >= attempts:
                 raise
             sleep(float(2**attempt))
             continue
         except Exception as exc:
-            last_error = FastMossError(
-                f"FastMoss network request failed: {exc}",
-                category="network",
-            )
-            if attempt + 1 >= attempts:
+            last_error = _network_error(exc, "FastMoss request")
+            if not last_error.retryable or attempt + 1 >= attempts:
                 raise last_error from exc
             sleep(float(2**attempt))
             continue

@@ -215,6 +215,36 @@ def test_invalid_client_secret_is_attributed_to_authentication():
         assert "invalid client_secret" in str(exc)
 
 
+def test_tls_route_failure_is_actionable_and_not_retried():
+    client = load_client()
+    calls = []
+    sleeps = []
+
+    def tls_failure(_url, **_kwargs):
+        calls.append(True)
+        raise client._network_error(
+            RuntimeError("SSLError: UNEXPECTED_EOF_WHILE_READING"),
+            "FastMoss request",
+        )
+
+    try:
+        client.query_products(
+            ["1736655705387075351"],
+            "secret",
+            post=tls_failure,
+            attempts=3,
+            sleep=sleeps.append,
+        )
+        raise AssertionError("TLS route failure was accepted")
+    except client.FastMossError as exc:
+        assert exc.category == "network"
+        assert exc.retryable is False
+        assert "openapi.fastmoss.com" in str(exc)
+        assert "DIRECT" in str(exc)
+    assert calls == [True]
+    assert sleeps == []
+
+
 def test_kie_reverse_analysis_uses_image_and_untrusted_title_context():
     kie = load_module("kie_video_batch_under_fastmoss_test", KIE_SCRIPT)
     calls = []

@@ -35,6 +35,13 @@ H 会自动从图片同目录的 `fastmoss-product.json` 读取标题，并把�
 8. PID 发布固定使用 `--attach-pid`。视频文件 PID、计划表商品 PID 和 TikTok 所挂商品必须完全一致；任一视频缺少纯数字 PID 时停止建表。
 9. 预约间隔只允许 30 分钟的正整数倍。固定先检查、预览；只有用户输入 `FABU` 才正式发布。
 
+## 固定故障归因
+
+- `SSLEOFError`、`UNEXPECTED_EOF_WHILE_READING`、`ECONNRESET` 或 TLS 握手中断属于网络/代理路由错误，不得误报为 PID、密钥或额度问题，也不得用同一路由盲目重复请求。
+- 若启用了 Clash/Mihomo，优先检查 `openapi.fastmoss.com`。当代理节点测试失败而 `DIRECT` 测试成功时，只把该域名设为 `DIRECT`（直连）后重试；不要关闭全局代理，也不要改动 Codex/Kie 的网络或登录状态。
+- 修复后先重跑一次 FastMoss PID 查询。只有返回 HTTP 200、JSON `code=0` 且取得 `data.list`，才进入图片分析、生成和发布流程。
+- 禁止把 FastMoss Key 发给公共中转、网页代理或第三方调试服务。
+
 ## 自动识别
 
 - 纯数字长 ID：作为 PID，不当作菜单编号或普通文本。
